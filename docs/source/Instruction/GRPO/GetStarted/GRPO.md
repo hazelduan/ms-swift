@@ -110,6 +110,18 @@ optimizer.step()
 
 GRPO参数参考[文档](../../../Instruction/Command-line-parameters.md#grpo参数)
 
+## NPU 上的 Transformers Rollout Backend
+
+GRPO 在未设置 `--use_vllm true` 时会使用 transformers rollout backend。对于 Gemma4 这类走多模态 processor 的模型，同一个 fast tokenizer/processor 被多个 batch encode 线程并发复用时，部分环境会出现 `RuntimeError: Already borrowed`。
+
+如需在 NPU 上用 transformers rollout backend 运行 Gemma4 GRPO，可以设置：
+
+```shell
+export SWIFT_SERIAL_BATCH_ENCODE=1
+```
+
+该开关仅在环境变量显式设置时生效，会把 `InferEngine._batch_encode` 从并发编码切到串行编码；未设置该变量的模型仍走默认并发编码路径，vLLM rollout 路径不受影响。Gemma4 NPU 示例见 `examples/ascend/train/gemma4/gemma4_grpo_lora_gsm8k_npu.sh`。
+
 ## 集群支持
 
 ![](../../../../resources/grpo.png)

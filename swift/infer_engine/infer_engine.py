@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional, Union
 from swift.metrics import Metric
 from swift.model import get_ckpt_dir
 from swift.template import Template, get_template
-from swift.utils import Processor, ProcessorMixin, get_logger
+from swift.utils import Processor, ProcessorMixin, get_env_args, get_logger
 from .base import BaseInferEngine
 from .protocol import (ChatCompletionMessageToolCall, ChatCompletionResponse, ChatCompletionStreamResponse,
                        InferRequest, RequestConfig, UsageInfo)
@@ -33,6 +33,7 @@ class InferEngine(BaseInferEngine, ProcessorMixin):
         self.task_type = self.model_info.task_type
         self.config = self.model_info.config
         self.max_tokens_offset = 0
+        self.swift_serial_batch_encode = get_env_args('swift_serial_batch_encode', bool, False)
 
     def _get_template(self, processor: Processor, template_type: Optional[str] = None):
         ckpt_dir = get_ckpt_dir(processor.model_info.model_dir, getattr(self, 'adapters', None))
@@ -288,8 +289,20 @@ class InferEngine(BaseInferEngine, ProcessorMixin):
         return InferEngine.thread_run(asyncio_run, args=(coro, ))
 
     def _batch_encode(self, infer_requests: List[InferRequest], strict: bool):
-        max_workers = max(min(32, os.cpu_count(), len(infer_requests)), 1)
         error_list = []
+        if self.swift_serial_batch_encode:
+            batched_inputs = []
+            for i, infer_request in enumerate(infer_requests):
+                try:
+                    batched_inputs.append(self.template.encode(infer_request, return_template_inputs=True))
+                except Exception as e:
+                    if strict:
+                        raise
+                    error_list.append((i, e))
+                    continue
+            return batched_inputs, error_list
+
+        max_workers = max(min(32, os.cpu_count(), len(infer_requests)), 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(self.template.encode, infer_request, return_template_inputs=True)

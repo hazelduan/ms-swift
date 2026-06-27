@@ -110,6 +110,18 @@ For training script examples, refer to [examples](https://github.com/modelscope/
 
 For GRPO parameters, refer to the [documentation](../../../Instruction/Command-line-parameters.md#grpo-arguments)
 
+## Transformers Rollout Backend on NPU
+
+GRPO uses the transformers rollout backend when `--use_vllm true` is not set. For models such as Gemma4 that use a multimodal processor path, concurrently reusing the same fast tokenizer/processor across batch encode threads may raise `RuntimeError: Already borrowed` in some environments.
+
+When running Gemma4 GRPO on NPU with the transformers rollout backend, set:
+
+```shell
+export SWIFT_SERIAL_BATCH_ENCODE=1
+```
+
+This switch only takes effect when the environment variable is explicitly set. It changes `InferEngine._batch_encode` from concurrent encoding to serial encoding; models without this variable keep the default concurrent path, and vLLM rollout is not affected. See `examples/ascend/train/gemma4/gemma4_grpo_lora_gsm8k_npu.sh` for the Gemma4 NPU example.
+
 ## Cluster Support
 
 ![](../../../../resources/grpo.png)
