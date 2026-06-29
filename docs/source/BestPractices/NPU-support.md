@@ -89,6 +89,7 @@
 | SFT       | Ovis2.5-2B                  | FSDP1/FSDP2/deepspeed | Atlas 900 A2 PODc |
 | SFT       | Qwen3.5-27B                 | FSDP1/FSDP2/deepspeed/Megatron | Atlas 900 A2 PODc/A3 SuperPoD |
 | SFT       | Qwen3.5-35B-A3B             | FSDP1/FSDP2/deepspeed/Megatron | Atlas 900 A2 PODc/A3 SuperPoD |
+| SFT       | Gemma4-26B-A4B-it           | deepspeed/LoRA        | Atlas 900 A3 SuperPoD |
 
 ### 已验证 RL 组合
 
@@ -96,6 +97,7 @@
 | --------- | ------------------- | --------- | -------------- | ----------------- |
 | **GRPO**  | Qwen2.5-7B-Instruct | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
 | **GRPO**  | Qwen3-8B            | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
+| **GRPO**  | Gemma4-26B-A4B-it   | deepspeed/LoRA | transformers | Atlas 900 A3 SuperPoD |
 | **DPO**   | Qwen2.5-7B-Instruct | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
 | **DPO**   | Qwen3-8B            | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
 | **PPO**   | Qwen2.5-7B-Instruct | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
@@ -615,6 +617,53 @@ swift sft \
 - 提高稳定性：NPU 上建议优先使用 `bfloat16`；如果遇到 loss 异常或 NaN，可以先缩小学习率、降低 batch，必要时再临时切到 `float32` 做对照定位。
 
 更多参数含义可以在[命令行参数文档](../Instruction/Command-line-parameters.md)中查询。
+
+### Gemma4 NPU LoRA SFT/GRPO 示例
+
+Gemma4-26B-A4B-it 已在 Atlas 900 A3 SuperPoD 上完成 LoRA SFT smoke、LoRA GRPO smoke 和 200 step GRPO 稳态验证。Gemma4 的模型识别依赖较新的 Transformers 版本，下面是已验证环境：
+
+| package | version |
+| ------- | ------- |
+| Python | 3.11.15 |
+| CANN | 9.0.0 |
+| torch | 2.9.0+cpu |
+| torch_npu | 2.9.0 |
+| ms-swift | 4.4.0.dev0 source |
+| transformers | 5.9.0 |
+| huggingface_hub | 1.21.0 |
+| hf-xet | 1.5.1 |
+| click | 8.4.2 |
+| trl | 0.29.1 |
+| deepspeed | 0.18.9 |
+| vllm-ascend | 0.18.0 |
+
+其中 `vllm-ascend` 是 NPU 环境栈的一部分；下面的 Gemma4 GRPO 示例使用的是默认 transformers rollout engine，不依赖 vLLM rollout。
+
+准备好模型后，设置 `MODEL_PATH` 指向本地 Gemma4 目录：
+
+```shell
+export MODEL_PATH=/path/to/gemma-4-26B-A4B-it
+```
+
+SFT smoke 示例：
+
+```shell
+bash examples/ascend/train/gemma4/gemma4_sft_lora_smoke_npu.sh
+```
+
+GRPO 示例默认使用 `modelscope/gsm8k`，适合从 smoke 扩展到较长步数稳定性验证：
+
+```shell
+MAX_STEPS=200 bash examples/ascend/train/gemma4/gemma4_grpo_lora_gsm8k_npu.sh
+```
+
+Gemma4 会走多模态 processor 路径。在 transformers rollout backend 下，如果多个线程同时复用同一个 fast tokenizer/processor 做 batch encode，部分环境会触发 `RuntimeError: Already borrowed`。GRPO 示例脚本默认设置 `SWIFT_SERIAL_BATCH_ENCODE=1`，只在显式设置该环境变量时把 `InferEngine._batch_encode` 改为串行编码；未设置该变量的模型仍使用默认并发编码路径，vLLM rollout 路径也不受影响。
+
+已验证结果：
+
+- SFT smoke：`global_step/max_steps=1/1`，`train_loss=6.125`，`train_speed=4.714s/it`。
+- GRPO smoke：`global_step/max_steps=1/1`，`train_speed=20.82s/it`。
+- GRPO 稳态：`modelscope/gsm8k`，`train_dataset.num_rows=7473`，`global_step/max_steps=200/200`，末 50 step 平均 `13.52s/it`，CV `0.12%`。
 
 ### NPU模型Patch开关
 

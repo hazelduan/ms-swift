@@ -89,6 +89,7 @@ For base environment setup, see the [Ascend PyTorch installation guide](https://
 | SFT       | Ovis2.5-2B                  | FSDP1/FSDP2/deepspeed | Atlas 900 A2 PODc |
 | SFT       | Qwen3.5-27B                 | FSDP1/FSDP2/deepspeed/Megatron | Atlas 900 A2 PODc/A3 SuperPoD |
 | SFT       | Qwen3.5-35B-A3B             | FSDP1/FSDP2/deepspeed/Megatron | Atlas 900 A2 PODc/A3 SuperPoD |
+| SFT       | Gemma4-26B-A4B-it           | deepspeed/LoRA        | Atlas 900 A3 SuperPoD |
 
 ### Verified RL Combinations
 
@@ -96,6 +97,7 @@ For base environment setup, see the [Ascend PyTorch installation guide](https://
 | --------- | ------------------- | --------- | -------------- | ----------------- |
 | **GRPO**  | Qwen2.5-7B-Instruct | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
 | **GRPO**  | Qwen3-8B            | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
+| **GRPO**  | Gemma4-26B-A4B-it   | deepspeed/LoRA | transformers | Atlas 900 A3 SuperPoD |
 | **DPO**   | Qwen2.5-7B-Instruct | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
 | **DPO**   | Qwen3-8B            | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
 | **PPO**   | Qwen2.5-7B-Instruct | deepspeed | vllm-ascend    | Atlas 900 A2 PODc |
@@ -627,6 +629,53 @@ When tuning parameters, focus on memory, throughput, and stability:
 - Improve stability: on NPUs, prefer `bfloat16`. If you see abnormal loss or NaN, first lower the learning rate and batch size; if necessary, temporarily switch to `float32` for comparison.
 
 For more parameter details, see [Command-line Parameters](../Instruction/Command-line-parameters.md).
+
+### Gemma4 NPU LoRA SFT/GRPO Example
+
+Gemma4-26B-A4B-it has been verified on Atlas 900 A3 SuperPoD for LoRA SFT smoke, LoRA GRPO smoke, and a 200-step GRPO steady-state run. Gemma4 model recognition requires a recent Transformers version. The verified environment is:
+
+| package | version |
+| ------- | ------- |
+| Python | 3.11.15 |
+| CANN | 9.0.0 |
+| torch | 2.9.0+cpu |
+| torch_npu | 2.9.0 |
+| ms-swift | 4.4.0.dev0 source |
+| transformers | 5.9.0 |
+| huggingface_hub | 1.21.0 |
+| hf-xet | 1.5.1 |
+| click | 8.4.2 |
+| trl | 0.29.1 |
+| deepspeed | 0.18.9 |
+| vllm-ascend | 0.18.0 |
+
+`vllm-ascend` is part of the validated NPU environment stack. The Gemma4 GRPO example below uses the default transformers rollout engine and does not depend on vLLM rollout.
+
+After preparing the model, set `MODEL_PATH` to the local Gemma4 directory:
+
+```shell
+export MODEL_PATH=/path/to/gemma-4-26B-A4B-it
+```
+
+SFT smoke example:
+
+```shell
+bash examples/ascend/train/gemma4/gemma4_sft_lora_smoke_npu.sh
+```
+
+The GRPO example uses `modelscope/gsm8k` by default, so it can be extended from smoke testing to a longer stability run:
+
+```shell
+MAX_STEPS=200 bash examples/ascend/train/gemma4/gemma4_grpo_lora_gsm8k_npu.sh
+```
+
+Gemma4 uses a multimodal processor path. With the transformers rollout backend, concurrently sharing the same fast tokenizer/processor for batch encoding may raise `RuntimeError: Already borrowed` in some environments. The GRPO example sets `SWIFT_SERIAL_BATCH_ENCODE=1` by default. This only changes `InferEngine._batch_encode` to serial encoding when the environment variable is explicitly set; models without this variable keep the default concurrent encoding path, and vLLM rollout is not affected.
+
+Verified results:
+
+- SFT smoke: `global_step/max_steps=1/1`, `train_loss=6.125`, `train_speed=4.714s/it`.
+- GRPO smoke: `global_step/max_steps=1/1`, `train_speed=20.82s/it`.
+- GRPO steady-state: `modelscope/gsm8k`, `train_dataset.num_rows=7473`, `global_step/max_steps=200/200`, last-50-step mean `13.52s/it`, CV `0.12%`.
 
 ### NPU Model Patch Switch
 
