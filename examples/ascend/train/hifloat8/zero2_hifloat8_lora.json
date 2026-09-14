@@ -8,9 +8,9 @@
   "hifloat8": {
     "enabled": true,
     "module_name_patterns": [
-      "*.mlp.gate_proj",
-      "*.mlp.up_proj",
-      "*.mlp.down_proj"
+      "*.mlp.gate_proj.base_layer",
+      "*.mlp.up_proj.base_layer",
+      "*.mlp.down_proj.base_layer"
     ],
     "min_numel": 1048576,
     "expected_module_count": 84
