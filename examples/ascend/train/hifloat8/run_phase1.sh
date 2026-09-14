@@ -73,8 +73,8 @@ PY
 device_check() {
     local label="$1"
     local snapshot="$HIF8_OUTPUT_ROOT/device_${label}.log"
-    local attempt
-    for attempt in 1 2 3 4 5; do
+    local attempt max_attempts=30
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
         npu-smi info >"$snapshot" 2>&1
         if grep -Fq "No running processes found in NPU $HIF8_DEVICE" "$snapshot" && \
             awk -F '|' -v id="$HIF8_DEVICE" '
@@ -84,9 +84,9 @@ device_check() {
             ' "$snapshot"; then
             return 0
         fi
-        (( attempt < 5 )) && sleep 2
+        (( attempt < max_attempts )) && sleep 2
     done
-    die "NPU $HIF8_DEVICE is occupied, unhealthy, or ambiguous after retries; see $snapshot"
+    die "NPU $HIF8_DEVICE is occupied, unhealthy, or ambiguous after a 60-second cleanup window; see $snapshot"
 }
 
 preflight() {
