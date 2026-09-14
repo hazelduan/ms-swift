@@ -159,6 +159,16 @@ def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
         for index, child in enumerate(value):
             result.update(flatten(child, f"{prefix}[{index}]"))
         return result
+    if (
+        value.__class__.__module__.startswith("deepspeed.runtime.fp16.loss_scaler")
+        and hasattr(value, "__dict__")
+    ):
+        type_name = (
+            f"{value.__class__.__module__}.{value.__class__.__qualname__}"
+        )
+        result = {f"{prefix}.__type__": type_name}
+        result.update(flatten(vars(value), prefix))
+        return result
     return {prefix: value}
 
 

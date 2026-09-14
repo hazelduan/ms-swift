@@ -53,6 +53,33 @@ class HiFloat8StepTimer(TrainerCallback):
                     )
                     for name, module in self.hifloat8_modules
                 ]
+                if state.is_world_process_zero:
+                    modules = [
+                        {
+                            "name": name,
+                            "in_features": module.in_features,
+                            "out_features": module.out_features,
+                            "weight_numel": module.weight.numel(),
+                            "weight_dtype": str(module.weight.dtype),
+                            "weight_requires_grad": module.weight.requires_grad,
+                        }
+                        for name, module in self.hifloat8_modules
+                    ]
+                    census = {
+                        "count": len(modules),
+                        "matrix_elements": sum(
+                            item["weight_numel"] for item in modules
+                        ),
+                        "names": [item["name"] for item in modules],
+                        "modules": modules,
+                    }
+                    os.makedirs(args.output_dir, exist_ok=True)
+                    with open(
+                        os.path.join(args.output_dir, "hifloat8_module_census.json"),
+                        "w",
+                        encoding="utf-8",
+                    ) as stream:
+                        json.dump(census, stream, indent=2, sort_keys=True)
         except (ImportError, RuntimeError):
             pass
         parameters = list(model.named_parameters()) if model is not None else []

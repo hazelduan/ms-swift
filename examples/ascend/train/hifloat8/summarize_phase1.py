@@ -183,15 +183,47 @@ def module_census(
     run_root: Path, tuner: str, phase: str = "accuracy"
 ) -> dict[str, Any]:
     log = run_root / f"{phase}/{tuner}_hifloat8/stdout.log"
-    text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
-    matches = re.findall(
-        r"HiFloat8 training converted (\d+) Linear modules \((\d+) matrix elements\): (\[[^\n]+\])",
-        text,
+    census_path = (
+        run_root
+        / f"{phase}/{tuner}_hifloat8/output/hifloat8_module_census.json"
     )
-    if not matches:
-        return {"pass": False, "reason": "conversion census not found", "log": str(log)}
-    count, elements, names_text = matches[-1]
-    names = ast.literal_eval(names_text)
+    if census_path.is_file():
+        census = json.loads(census_path.read_text(encoding="utf-8"))
+        count = census.get("count")
+        elements = census.get("matrix_elements")
+        names = census.get("names")
+        modules = census.get("modules")
+    else:
+        modules = None
+        text = (
+            log.read_text(encoding="utf-8", errors="replace")
+            if log.is_file()
+            else ""
+        )
+        matches = re.findall(
+            r"HiFloat8 training converted (\d+) Linear modules \((\d+) matrix elements\): (\[[^\n]+\])",
+            text,
+        )
+        if not matches:
+            return {
+                "pass": False,
+                "reason": "conversion census not found",
+                "census": str(census_path),
+                "log": str(log),
+            }
+        count, elements, names_text = matches[-1]
+        names = ast.literal_eval(names_text)
+    try:
+        count, elements = int(count), int(elements)
+    except (TypeError, ValueError):
+        count, elements = None, None
+    if count is None or elements is None or not isinstance(names, list):
+        return {
+            "pass": False,
+            "reason": "conversion census is malformed",
+            "census": str(census_path),
+            "log": str(log),
+        }
     suffixes = [
         f".mlp.{projection}" for projection in ("gate_proj", "up_proj", "down_proj")
     ]
@@ -206,16 +238,54 @@ def module_census(
         if any(part in name for part in ("self_attn", "lm_head", "embed", "lora_"))
     ]
     passed = (
-        int(count) == len(names) == 84 and int(elements) == 264241152 and not forbidden
+        all(isinstance(name, str) for name in names)
+        and count == len(names) == len(set(names)) == 84
+        and elements == 264241152
+        and not forbidden
     )
     passed &= all(value == 28 for value in suffix_counts.values())
+    module_details_pass = modules is None or (
+        isinstance(modules, list)
+        and len(modules) == 84
+        and {item.get("name") for item in modules if isinstance(item, dict)}
+        == set(names)
+        and all(
+            isinstance(item, dict)
+            and item.get("name") in names
+            and item.get("weight_dtype") == "torch.bfloat16"
+            and isinstance(item.get("in_features"), int)
+            and isinstance(item.get("out_features"), int)
+            and item.get("weight_numel")
+            == item.get("in_features") * item.get("out_features")
+            and item.get("weight_requires_grad") == (tuner == "full")
+            and (
+                (
+                    item.get("in_features") == 1024
+                    and item.get("out_features") == 3072
+                    and any(
+                        item.get("name", "").endswith(suffix)
+                        for suffix in suffixes[:2]
+                    )
+                )
+                or (
+                    item.get("in_features") == 3072
+                    and item.get("out_features") == 1024
+                    and item.get("name", "").endswith(suffixes[2])
+                )
+            )
+            for item in modules
+        )
+    )
+    passed &= module_details_pass
     return {
         "pass": passed,
         "count": int(count),
         "matrix_elements": int(elements),
         "suffix_counts": suffix_counts,
         "forbidden": forbidden,
+        "module_details_pass": module_details_pass,
         "names": names,
+        "census": str(census_path),
         "log": str(log),
     }
 

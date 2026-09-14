@@ -401,7 +401,10 @@ performance() {
 }
 
 profile() {
-    local args=(--external_plugins "$HERE/npu_profile.py" --callbacks hifloat8_profiler)
+    local args=(
+        --external_plugins "$HERE/step_timer.py" "$HERE/npu_profile.py"
+        --callbacks hifloat8_step_timer hifloat8_profiler
+    )
     launch profile/full_hifloat8 "$HERE/qwen3_0_6b_full.yaml" "$HERE/zero2_hifloat8.json" 4 no no "${args[@]}"
     launch profile/lora_hifloat8 "$HERE/qwen3_0_6b_lora.yaml" "$HERE/zero2_hifloat8_lora.json" 4 no no "${args[@]}"
 }
