@@ -8,13 +8,16 @@ REPO_ROOT="$(cd -- "$HERE/../../../.." && pwd -P)"
 : "${HIF8_OUTPUT_ROOT:?set HIF8_OUTPUT_ROOT to a task-owned experiment directory}"
 : "${HIF8_CONDA_ENV:?set HIF8_CONDA_ENV to the isolated Python environment}"
 : "${HIF8_CANN_ENV:?set HIF8_CANN_ENV to the selected CANN set_env.sh}"
+: "${HIF8_RANK_TABLE_FILE:?set HIF8_RANK_TABLE_FILE to a task-owned CANN v2 rank table}"
 : "${HIF8_DEEPSPEED_REPO:?set HIF8_DEEPSPEED_REPO to the editable DeepSpeed checkout}"
 : "${HIF8_TORCH_NPU_REPO:?set HIF8_TORCH_NPU_REPO to the editable torch-npu checkout}"
 HIF8_DEVICE="${HIF8_DEVICE:-4}"
 HIF8_CPUSET="${HIF8_CPUSET:-0-63,128-191}"
 HIF8_EXPECTED_CANN_VERSION="${HIF8_EXPECTED_CANN_VERSION:-9.1.0}"
 HIF8_MASTER_PORT="${HIF8_MASTER_PORT:-29531}"
+HIF8_HCCL_CONNECT_TIMEOUT="${HIF8_HCCL_CONNECT_TIMEOUT:-300}"
 export HIF8_MODEL HIF8_SOURCE_DATA HIF8_OUTPUT_ROOT HIF8_CONDA_ENV HIF8_CANN_ENV
+export HIF8_RANK_TABLE_FILE HIF8_HCCL_CONNECT_TIMEOUT
 export HIF8_DEEPSPEED_REPO HIF8_TORCH_NPU_REPO HIF8_DEVICE HIF8_CPUSET
 export HIF8_EXPECTED_CANN_VERSION
 export HIF8_MASTER_PORT
@@ -28,7 +31,7 @@ activate_clean_environment() {
     local name torch_lib
     while IFS='=' read -r name _; do
         case "$name" in
-            ASCEND*|ACL*|HCCL*|LD_LIBRARY_PATH|PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|CUDA_VISIBLE_DEVICES|ASCEND_RT_VISIBLE_DEVICES|RANK|WORLD_SIZE|LOCAL_RANK|LOCAL_WORLD_SIZE|GROUP_RANK|ROLE_RANK|NPROC_PER_NODE|NNODES|NODE_RANK|MASTER_ADDR|MASTER_PORT)
+            ASCEND*|ACL*|HCCL*|LD_LIBRARY_PATH|PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|CUDA_VISIBLE_DEVICES|NPU_VISIBLE_DEVICES|ASCEND_RT_VISIBLE_DEVICES|RANK_TABLE_FILE|RANK|WORLD_SIZE|LOCAL_RANK|LOCAL_WORLD_SIZE|GROUP_RANK|ROLE_RANK|NPROC_PER_NODE|NNODES|NODE_RANK|MASTER_ADDR|MASTER_PORT)
                 unset "$name"
                 ;;
         esac
@@ -54,6 +57,9 @@ PY
 )"
     export LD_LIBRARY_PATH="$torch_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export ASCEND_RT_VISIBLE_DEVICES="$HIF8_DEVICE"
+    export NPU_VISIBLE_DEVICES="$HIF8_DEVICE"
+    export RANK_TABLE_FILE="$HIF8_RANK_TABLE_FILE"
+    export HCCL_CONNECT_TIMEOUT="$HIF8_HCCL_CONNECT_TIMEOUT"
     export RANK=0 WORLD_SIZE=1 LOCAL_RANK=0 LOCAL_WORLD_SIZE=1
     export MASTER_ADDR=localhost MASTER_PORT="$HIF8_MASTER_PORT"
     export PYTHONHASHSEED=42
@@ -87,6 +93,13 @@ preflight() {
     [[ "$(command -v swift)" == "$HIF8_CONDA_ENV/bin/swift" ]] || \
         die "swift does not resolve from the isolated environment"
     [[ -f "$HIF8_CANN_ENV" ]] || die "CANN set_env.sh is unavailable"
+    [[ -f "$HIF8_RANK_TABLE_FILE" && -r "$HIF8_RANK_TABLE_FILE" ]] || \
+        die "CANN v2 rank table is unavailable"
+    [[ ! -L "$HIF8_RANK_TABLE_FILE" ]] || die "rank table must not be a symlink"
+    [[ "$HIF8_HCCL_CONNECT_TIMEOUT" =~ ^[0-9]+$ ]] || \
+        die "HIF8_HCCL_CONNECT_TIMEOUT must be an integer"
+    (( HIF8_HCCL_CONNECT_TIMEOUT >= 300 )) || \
+        die "HIF8_HCCL_CONNECT_TIMEOUT must be at least 300 seconds"
     command -v npu-smi >/dev/null || die "npu-smi is unavailable"
     command -v taskset >/dev/null || die "taskset is unavailable"
     [[ -d "$HIF8_MODEL" ]] || die "model directory does not exist"
@@ -118,6 +131,39 @@ expected = {
     'swift': Path.cwd().resolve(),
 }
 modules = {'deepspeed': deepspeed, 'torch_npu': torch_npu, 'swift': swift}
+repo_root = Path.cwd().resolve()
+rank_table_path = Path(os.environ['HIF8_RANK_TABLE_FILE']).resolve()
+if rank_table_path.is_relative_to(repo_root):
+    raise SystemExit('rank table is a runtime artifact and must stay outside the repository')
+rank_table = json.loads(rank_table_path.read_text(encoding='utf-8'))
+rank_list = rank_table.get('rank_list')
+expected_device = int(os.environ['HIF8_DEVICE'])
+if rank_table.get('version') != '2.0' or rank_table.get('rank_count') != 1:
+    raise SystemExit('rank table must be a CANN v2 single-rank document')
+if not isinstance(rank_list, list) or len(rank_list) != 1:
+    raise SystemExit('rank table must contain exactly one rank')
+rank = rank_list[0]
+if rank.get('rank_id') != 0 or rank.get('device_id') != expected_device:
+    raise SystemExit(f'rank table must map rank 0 to physical device {expected_device}')
+if rank.get('local_id') != expected_device:
+    raise SystemExit(f'rank table local_id must be physical device {expected_device}')
+levels = rank.get('level_list')
+if not isinstance(levels, list) or not levels:
+    raise SystemExit('rank table level_list must be non-empty')
+addresses = [
+    address
+    for level in levels
+    for address in level.get('rank_addr_list', [])
+]
+if not addresses or any(
+    address.get('addr_type') != 'EID'
+    or re.fullmatch(r'[0-9a-fA-F]{32}', str(address.get('addr', ''))) is None
+    for address in addresses
+):
+    raise SystemExit('rank table must contain 32-hex-digit EID addresses')
+topology_path = Path(str(rank_table.get('topo_file_path', '')))
+if not topology_path.is_absolute() or not topology_path.is_file():
+    raise SystemExit('rank table topo_file_path must name an existing absolute file')
 paths = {name: Path(inspect.getfile(module)).resolve() for name, module in modules.items()}
 for name in expected:
     if not paths[name].is_relative_to(expected[name]):
@@ -186,6 +232,12 @@ payload = {
     },
     'cpu_affinity': os.environ['HIF8_CPUSET'],
     'cann_environment': os.environ['HIF8_CANN_ENV'],
+    'rank_table': {
+        'path': str(rank_table_path),
+        'sha256': sha256(rank_table_path),
+        'topo_file_path': str(topology_path),
+        'eid_count': len(addresses),
+    },
     'model_manifest': model_manifest,
     'source_dataset_sha256': sha256(os.environ['HIF8_SOURCE_DATA']),
 }
@@ -209,6 +261,49 @@ PY
         die "torch_npu has unresolved shared libraries; see torch_npu_extension_ldd.log"
     grep -Eq '/cann-(8|9\.0)|ascend-toolkit/latest' "$HIF8_OUTPUT_ROOT/torch_npu_extension_ldd.log" && \
         die "torch_npu resolved a stale CANN library; see torch_npu_extension_ldd.log"
+    device_check hccl_preflight
+    python - "$HIF8_OUTPUT_ROOT/hccl_world1.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+import torch
+import torch.distributed as dist
+import torch_npu
+
+torch.npu.set_device(0)
+dist.init_process_group(
+    backend='hccl',
+    init_method='env://',
+    rank=0,
+    world_size=1,
+    timeout=timedelta(seconds=int(os.environ['HIF8_HCCL_CONNECT_TIMEOUT'])),
+)
+try:
+    value = torch.tensor([3.25], dtype=torch.float32, device='npu')
+    dist.all_reduce(value)
+    dist.barrier()
+    torch.npu.synchronize()
+    payload = {
+        'backend': dist.get_backend(),
+        'rank': dist.get_rank(),
+        'world_size': dist.get_world_size(),
+        'value': float(value.cpu().item()),
+        'rank_table_sha256': hashlib.sha256(
+            Path(os.environ['RANK_TABLE_FILE']).read_bytes()
+        ).hexdigest(),
+    }
+finally:
+    dist.destroy_process_group()
+if payload['value'] != 3.25:
+    raise SystemExit(f'world-size-1 HCCL all-reduce changed its input: {payload}')
+Path(sys.argv[1]).write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+)
+PY
     return 0
 }
 
@@ -230,7 +325,6 @@ launch() {
         --dataset "$HIF8_OUTPUT_ROOT/data/train.jsonl"
         --val_dataset "$HIF8_OUTPUT_ROOT/data/eval.jsonl"
         --deepspeed "$deepspeed_config"
-        --ddp_backend gloo
         --output_dir "$run_dir/output"
         --max_steps "$max_steps"
         --eval_strategy "$eval_strategy"

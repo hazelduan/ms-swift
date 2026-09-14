@@ -24,24 +24,29 @@ export HIF8_SOURCE_DATA=<alpaca-500-jsonl>
 export HIF8_OUTPUT_ROOT=<task-owned-output-directory>
 export HIF8_CONDA_ENV=<isolated-conda-environment>
 export HIF8_CANN_ENV=<cann-9.1-set-env-script>
+export HIF8_RANK_TABLE_FILE=<task-owned-cann-v2-single-rank-json>
 export HIF8_DEEPSPEED_REPO=<deepspeed-checkout>
 export HIF8_TORCH_NPU_REPO=<torch-npu-checkout>
 export HIF8_DEVICE=4
 export HIF8_CPUSET=<numa0-cpu-list>
 export HIF8_MASTER_PORT=<free-local-port>
+export HIF8_HCCL_CONNECT_TIMEOUT=300
 ```
 
 `run_phase1.sh` clears stale Ascend/CANN and distributed-launch variables,
 selects the chosen environment directly, sources exactly one CANN setup script,
-and rejects any device other
-than physical NPU 4. Before every process it saves `npu-smi info` and proceeds
+validates and exports a CANN v2 rank table outside the repository, and rejects
+any device other than physical NPU 4. The rank table must map rank 0 to that
+physical device and contain hardware-generated 32-hex-digit EIDs. Before every
+process it saves `npu-smi info` and proceeds
 only when the card is healthy and its process table explicitly says it is free.
 It also verifies Python `3.11.15`, torch `2.9.0+cpu`, torch_npu
 `2.9.0.post4`, Transformers `5.16.1`, CANN `9.1.0`, clean editable source
 trees, import paths, and revisions. Processes are pinned with `taskset`
 to the supplied NUMA0 CPU list; the host does not require `numactl`.
 The runner sets an explicit rank-0/world-size-1 local process group so
-DeepSpeed never falls back to MPI discovery.
+DeepSpeed never falls back to MPI discovery, and its preflight requires a real
+HCCL all-reduce through that rank table before any training launch.
 On this A5 host, `npu-smi`/DCMI returns permission error `-8005` for the `dxq`
 account, so launch the harness as root while pointing it at the isolated existing
 environment and task-owned work/output paths. The runner fails closed otherwise.
@@ -96,7 +101,8 @@ exactly zero. Missing callback evidence fails the summary.
 The summary command loads the complete curves, performs tensor-level checkpoint
 comparison, reads all optimizer/scheduler tensors, scans native profiler files,
 and emits JSON, CSV, and Markdown. It returns nonzero unless every correctness
-gate passes; performance is always reported but is not a correctness gate.
+gate and every requested performance run are complete; measured speedup is
+always reported but is not a pass/fail threshold.
 
 ```bash
 python examples/ascend/train/hifloat8/summarize_phase1.py \
