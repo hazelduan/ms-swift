@@ -1137,7 +1137,7 @@ class SwiftMixin:
 
     def create_optimizer(self, model=None):
         self._optimizer_ori = self.optimizer = self.optimizer_callback.create_optimizer(model=model)
-        if self.optimizer is not None:
+        if self.optimizer is not None and hasattr(self.optimizer, 'param_groups'):
             self.optimizer.param_groups = [pg for pg in self.optimizer.param_groups if len(pg['params']) > 0]
             self._disable_foreach_for_deepspeed()
         return self.optimizer
@@ -1146,7 +1146,12 @@ class SwiftMixin:
         if optimizer is None:
             # fix deepspeed & cosine_with_min_lr (transformers 5.8.0)
             optimizer = getattr(self, '_optimizer_ori', None)
-        self.lr_scheduler = self.optimizer_callback.create_scheduler(num_training_steps, optimizer)
+        callback = self.optimizer_callback
+        if callback.trainer is not self:
+            # Transformers shallow-copies the trainer for DeepSpeed's deferred scheduler.
+            callback = copy(callback)
+            callback.trainer = self
+        self.lr_scheduler = callback.create_scheduler(num_training_steps, optimizer)
         return self.lr_scheduler
 
     @staticmethod
