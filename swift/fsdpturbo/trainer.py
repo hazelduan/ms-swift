@@ -133,11 +133,22 @@ class FSDPTurboTrainer(BaseTrainer):
 
     def setup(self):
         super().setup()
+        self._initialize_loss_group()
         steps_per_epoch = len(self.dataloader)
         if steps_per_epoch < 1:
             raise ValueError('FSDPTurbo requires at least one local training batch per epoch.')
         required_epochs = math.ceil(self.train_args.max_steps / steps_per_epoch)
         self.config.run.num_train_epochs = max(self.config.run.num_train_epochs, required_epochs)
+
+    def _initialize_loss_group(self):
+        # HCCL allocates communicator buffers lazily. Initialize the separate
+        # metric-reduction group before backward fills the allocator cache.
+        parallel_state = self.model.parallel_state
+        if parallel_state.get_data_group_size() > 1:
+            device = self.train_args.device
+            probe = torch.zeros((), device=device)
+            dist.all_reduce(probe, group=parallel_state.get_data_group())
+            probe.item()  # Complete communicator allocation before training.
 
     def _init_distributed(self):
         from fsdp_turbo.utils.log import set_log_level
