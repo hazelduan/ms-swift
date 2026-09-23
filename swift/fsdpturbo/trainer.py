@@ -140,6 +140,11 @@ class FSDPTurboTrainer(BaseTrainer):
         self.config.run.num_train_epochs = max(self.config.run.num_train_epochs, required_epochs)
 
     def _init_distributed(self):
+        from fsdp_turbo.utils.log import set_log_level
+
+        # Swift may already own the process group, so BaseTrainer can return
+        # before configuring the backend topology and per-step metric logs.
+        set_log_level("INFO")
         super()._init_distributed()
         self.args.validate_fsdpturbo(dist.get_world_size())
 
