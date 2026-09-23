@@ -6,8 +6,10 @@ from .gemma4 import Gemma4AgentTemplate
 from .glm4 import (ChatGLM4AgentTemplate, GLM4_5AgentTemplate, GLM4_7AgentTemplate, GLM4AgentTemplate,
                    GLM5_1AgentTemplate)
 from .hermes import HermesAgentTemplate, HunyuanHermesAgentTemplate
-from .hy_v3 import HyV3AgentTemplate
+from .hy_v3 import HyV3AgentTemplate, HyV3PreviewAgentTemplate
+from .kimi_k3 import KimiK3AgentTemplate
 from .kimi_k25 import KimiK25AgentTemplate
+from .ling3 import Ling3AgentTemplate
 from .llama import Llama3AgentTemplate, Llama4AgentTemplate
 from .minicpm5 import MiniCPM5AgentTemplate
 from .minimax_m2 import MinimaxM2AgentTemplate
@@ -17,6 +19,7 @@ from .qwen import QwenEnAgentTemplate, QwenEnParallelAgentTemplate, QwenZhAgentT
 from .qwen3_coder import Qwen3_5AgentTemplate, Qwen3CoderAgentTemplate
 from .react import ReactEnAgentTemplate, ReactZnAgentTemplate
 from .seed_oss import SeedAgentTemplate
+from .spark import Spark2_5AgentTemplate
 from .toolbench import ToolBenchAgentTemplate
 from .youtu import YoutuAgentTemplate
 
@@ -33,6 +36,7 @@ agent_template_map = {
     'qwen3_5': Qwen3_5AgentTemplate,
     'hermes': HermesAgentTemplate,
     'hunyuan_hermes': HunyuanHermesAgentTemplate,
+    'hy_v3_preview': HyV3PreviewAgentTemplate,
     'hy_v3': HyV3AgentTemplate,
     'toolbench': ToolBenchAgentTemplate,  # ref: https://modelscope.cn/datasets/swift/ToolBench
     'chatglm4': ChatGLM4AgentTemplate,
@@ -49,6 +53,8 @@ agent_template_map = {
     'minimax_m2': MinimaxM2AgentTemplate,
     'minimax_m3': MinimaxM3AgentTemplate,
     'seed_oss': SeedAgentTemplate,
+    # ref: https://modelscope.cn/models/XHToken/Spark-X2.5-4B
+    'spark2_5': Spark2_5AgentTemplate,
     # ref: https://modelscope.cn/models/google/gemma-4-12B-it
     'gemma4': Gemma4AgentTemplate,
     # extra
@@ -56,5 +62,7 @@ agent_template_map = {
     'mistral': MistralAgentTemplate,
     'youtu': YoutuAgentTemplate,
     'kimi_k25': KimiK25AgentTemplate,
+    'kimi_k3': KimiK3AgentTemplate,
+    'ling3': Ling3AgentTemplate,
     'minicpm5': MiniCPM5AgentTemplate,
 }

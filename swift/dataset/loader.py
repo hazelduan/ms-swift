@@ -3,6 +3,7 @@ import numpy as np
 import os
 from contextlib import nullcontext
 from datasets import Dataset as HfDataset
+from datasets import IterableDataset as HfIterableDataset
 from datasets import load_dataset as hf_load_dataset
 from functools import partial
 from modelscope.hub.utils.utils import get_cache_dir
@@ -213,6 +214,15 @@ def init_self_cognition_preprocessor(
                      f"author: {kwargs['author']}.")
 
 
+def _inject_dataset_routing_tag(dataset: DATASET_TYPE, ds_name: str) -> DATASET_TYPE:
+    """Inject ``dataset`` column for multi-teacher routing (constant per source dataset)."""
+    if isinstance(dataset, HfIterableDataset):
+        return dataset.map(lambda example: {**example, 'dataset': ds_name})
+    if 'dataset' in dataset.column_names:
+        dataset = dataset.remove_columns('dataset')
+    return dataset.add_column('dataset', [ds_name] * len(dataset))
+
+
 def load_dataset(
     datasets: Union[List[str], str],
     *,
@@ -317,7 +327,7 @@ def load_dataset(
         use_hf_default = True if use_hf_hub() else False
     for dataset in datasets:
         dataset_syntax = DatasetSyntax.parse(dataset)
-        use_hf = dataset_syntax.use_hf or use_hf_default
+        use_hf = dataset_syntax.use_hf if dataset_syntax.use_hf is not None else use_hf_default
         # compat dataset_name
         if dataset_syntax.dataset in DATASET_MAPPING:
             dataset_meta = DATASET_MAPPING[dataset_syntax.dataset]
@@ -340,6 +350,13 @@ def load_dataset(
             disable_auto_column_mapping=disable_auto_column_mapping,
         )
         train_dataset = loader.load(dataset_syntax, dataset_meta, use_hf=use_hf)
+        # Inject dataset_syntax.dataset as routing tag for multi-teacher.
+        # Tag before post_process: sampling/splitting go through select(), and add_column() on a
+        # dataset that has an indices table falls back to flatten_indices(). That is a map() whose
+        # cache file path is derived from the fingerprint, so it is identical on every rank; on a
+        # shared filesystem the ranks then race to write the same file. The tag is constant per
+        # dataset, so tagging first is equivalent and keeps add_column() in memory.
+        train_dataset = _inject_dataset_routing_tag(train_dataset, dataset_syntax.dataset)
         train_dataset, val_dataset = loader.post_process(
             train_dataset,
             dataset_sample=dataset_syntax.dataset_sample,

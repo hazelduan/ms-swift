@@ -1,6 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 # Multi-turn Rollout Schedulers for GRPO training.
 import asyncio
+import json
 from abc import ABC
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -8,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from swift.infer_engine.protocol import (ChatCompletionResponse, ChatCompletionResponseChoice, RequestConfig,
                                          RolloutInferRequest, RolloutOutput)
 from swift.template import Messages
+from swift.template.utils import get_token_backed_response_ids
 from swift.utils import remove_response
 from .gym_env import Env, envs
 
@@ -25,9 +27,113 @@ class RolloutScheduler(ABC):
                  *args,
                  **kwargs):
         self.infer_engine = infer_engine
-        # Tokenizer can be passed explicitly (e.g., in colocate mode where infer_engine may be None)
+        # Tokenizer/template can be passed explicitly when colocate mode has no infer_engine.
         self._tokenizer = kwargs.get('tokenizer', None)
+        self._template = kwargs.get('template', None)
         self.max_turns = max_turns
+
+    def get_response_token_data(self,
+                                infer_request: 'RolloutInferRequest',
+                                response_choice: 'ChatCompletionResponseChoice',
+                                is_continuation: bool = False,
+                                response_token_ids: Optional[List[int]] = None,
+                                response_loss_mask: Optional[List[int]] = None) -> tuple[List[int], List[int]]:
+        """Return exact IDs and the loss mask for one generated assistant segment.
+
+        The engine reports sampled IDs only. The deterministic response prefix is
+        part of the prompt, but must be represented in the training completion as
+        masked IDs. Scheduler overrides are normalized by the same contract.
+        """
+        ids = list(response_choice.token_ids or []) if response_token_ids is None else list(response_token_ids)
+        mask = None if response_loss_mask is None else list(response_loss_mask)
+        if mask is not None:
+            assert len(mask) == len(ids), 'response_loss_mask must have the same length as response_token_ids'
+            assert all(value in (0, 1) for value in mask), 'response_loss_mask values must be 0 or 1'
+        if mask is None:
+            mask = [1] * len(ids)
+
+        prefix_ids: List[int] = []
+        template = self._template or getattr(self.infer_engine, 'template', None)
+        tokenizer = self.tokenizer
+        if not is_continuation and template is not None and tokenizer is not None:
+            from swift.template import StdTemplateInputs
+            template_inputs = StdTemplateInputs(
+                messages=[], chat_template_kwargs=dict(infer_request.chat_template_kwargs or {}))
+            response_prefix = template._get_response_prefix(template_inputs)
+            if response_prefix:
+                prefix_ids = list(tokenizer.encode(response_prefix, add_special_tokens=False))
+
+        prefix_is_explicit = (
+            prefix_ids and response_loss_mask is not None and ids[:len(prefix_ids)] == prefix_ids
+            and mask[:len(prefix_ids)] == [0] * len(prefix_ids))
+        if prefix_ids and not prefix_is_explicit:
+            ids = prefix_ids + ids
+            mask = [0] * len(prefix_ids) + mask
+        return ids, mask
+
+    def prepare_response_continuation(
+            self, response_choice: 'ChatCompletionResponseChoice') -> tuple[List[int], List[int], List[float]]:
+        """Normalize sampled output before appending deterministic content."""
+        token_ids = list(response_choice.token_ids or [])
+        if response_choice.logprobs is None:
+            rollout_logprobs = []
+        elif 'content' in response_choice.logprobs:
+            rollout_logprobs = [item['logprob'] for item in response_choice.logprobs['content']]
+        else:
+            rollout_logprobs = []
+        if rollout_logprobs and len(rollout_logprobs) != len(token_ids):
+            raise ValueError(f'rollout_logprobs length ({len(rollout_logprobs)}) must match sampled token_ids '
+                             f'length ({len(token_ids)})')
+        return token_ids, [1] * len(token_ids), rollout_logprobs
+
+    def set_assistant_message_token_ids(self, infer_request: 'RolloutInferRequest', token_ids: List[int]) -> None:
+        """Freeze the latest assistant message as exact IDs for the next inference turn."""
+        for message in reversed(infer_request.messages):
+            if message.get('role') == 'assistant':
+                message['content'] = list(token_ids)
+                return
+
+    def snapshot_and_materialize_assistant_messages(self,
+                                                    infer_request: 'RolloutInferRequest') -> List[tuple[dict, Any]]:
+        """Temporarily decode ID-backed assistant history for text-oriented scheduler hooks."""
+        tokenizer = self.tokenizer
+        snapshots = []
+        for message in infer_request.messages:
+            if message.get('role') != 'assistant':
+                continue
+            original_content = message.get('content')
+            token_ids = get_token_backed_response_ids(original_content)
+            if token_ids is None:
+                continue
+            if tokenizer is None:
+                raise RuntimeError('A tokenizer is required to materialize an ID-backed assistant response')
+            snapshots.append((message, deepcopy(original_content)))
+            message['content'] = tokenizer.decode(token_ids, skip_special_tokens=False)
+        return snapshots
+
+    @staticmethod
+    def restore_assistant_message_snapshots(snapshots: List[tuple[dict, Any]]) -> None:
+        """Restore exact assistant contents after text-oriented scheduler hooks."""
+        for message, content in snapshots:
+            message['content'] = content
+
+    def append_assistant_completion(self, infer_request: 'RolloutInferRequest', completion: str) -> bool:
+        """Append generated text, decoding an ID-backed message only for a continuation."""
+        messages = infer_request.messages
+        if messages[-1]['role'] != 'assistant':
+            messages.append({'role': 'assistant', 'content': completion})
+            return False
+
+        content = messages[-1].get('content')
+        token_ids = get_token_backed_response_ids(content)
+        if token_ids is not None:
+            tokenizer = self.tokenizer
+            if tokenizer is None:
+                raise RuntimeError('A tokenizer is required to continue an ID-backed assistant response')
+            content = tokenizer.decode(token_ids, skip_special_tokens=False)
+            messages[-1]['content'] = content
+        messages[-1]['content'] += completion
+        return True
 
     # ------------------------------------------------------------------
     # Universal hooks — called by BOTH ``run()`` (server mode) and
@@ -286,20 +392,19 @@ class MultiTurnScheduler(RolloutScheduler, ABC):
 
             # Update conversation history
             completion = response_choice.message.content
-            is_continuation = False
-            if messages[-1]['role'] == 'assistant':
-                messages[-1]['content'] += completion
-                is_continuation = True
-            else:
-                messages.append({'role': 'assistant', 'content': completion})
+            is_continuation = self.append_assistant_completion(current_request, completion)
 
             # Check stopping conditions
-            turn_result = await self.on_turn_end(current_request, response_choice, current_turn)
-            if turn_result.get('rollout_infos'):
-                rollout_infos.update(turn_result['rollout_infos'])
-            should_stop = self.check_finished(current_request, response_choice, current_turn)
-            if 'done' in turn_result:
-                should_stop = turn_result['done']
+            assistant_snapshots = self.snapshot_and_materialize_assistant_messages(current_request)
+            try:
+                turn_result = await self.on_turn_end(current_request, response_choice, current_turn)
+                if turn_result.get('rollout_infos'):
+                    rollout_infos.update(turn_result['rollout_infos'])
+                should_stop = self.check_finished(current_request, response_choice, current_turn)
+                if 'done' in turn_result:
+                    should_stop = turn_result['done']
+            finally:
+                self.restore_assistant_message_snapshots(assistant_snapshots)
 
             # double-check if user forget to judge the max_turns
             if self.max_turns:
@@ -308,22 +413,23 @@ class MultiTurnScheduler(RolloutScheduler, ABC):
             if should_stop:
                 # Collect final turn's data
                 current_logprobs = self._extract_logprobs_from_choice(response_choice)
-                final_token_ids = response_choice.token_ids
+                final_token_ids, final_loss_mask = self.get_response_token_data(
+                    current_request, response_choice, is_continuation=is_continuation)
 
                 if is_continuation and total_response_ids:
                     # For continuation, extend the last turn's data
                     total_response_ids[-1].extend(final_token_ids)
                     if total_response_loss_mask:
-                        total_response_loss_mask[-1].extend([1] * len(final_token_ids))
+                        total_response_loss_mask[-1].extend(final_loss_mask)
                     if total_rollout_logprobs and current_logprobs:
                         total_rollout_logprobs[-1].extend(current_logprobs)
-                elif not total_response_ids:
-                    # First turn stopped immediately - need to initialize with final response data
+                else:
+                    # Start a new assistant turn, including the first-turn-immediate-stop case.
                     if final_token_ids:
-                        total_response_ids = [list(final_token_ids)]
-                        total_response_loss_mask = [[1] * len(final_token_ids)]
+                        total_response_ids.append(list(final_token_ids))
+                        total_response_loss_mask.append(final_loss_mask)
                     if current_logprobs:
-                        total_rollout_logprobs = [current_logprobs]
+                        total_rollout_logprobs.append(current_logprobs)
 
                 # Validate rollout_logprobs completeness: if logprobs are incomplete (missing for some turns),
                 # clear them to disable rollout importance sampling correction (which requires complete logprobs)
@@ -358,7 +464,11 @@ class MultiTurnScheduler(RolloutScheduler, ABC):
                 )
 
             # Prepare next turn
+            response_ids, response_mask = self.get_response_token_data(
+                current_request, response_choice, is_continuation=is_continuation)
             ret = self.step(current_request, response_choice, current_turn)
+            ret.setdefault('response_token_ids', response_ids)
+            ret.setdefault('response_loss_mask', response_mask)
             current_request: 'RolloutInferRequest' = ret['infer_request']
 
             # Track response tokens and masks
@@ -395,6 +505,9 @@ class MultiTurnScheduler(RolloutScheduler, ABC):
                     total_rollout_logprobs[-1].extend(current_logprobs)
                 else:
                     total_rollout_logprobs.append(current_logprobs)
+
+            if total_response_ids:
+                self.set_assistant_message_token_ids(current_request, total_response_ids[-1])
 
             current_turn += 1
 
@@ -825,8 +938,141 @@ class GYMScheduler(MultiTurnScheduler):
         return envs[env_name](env_config)
 
 
+class OpenEnvScheduler(GYMScheduler):
+    """GYMScheduler specialised for OpenEnv environments.
+
+    Unlike GYMScheduler which uses async ``Env`` instances, OpenEnvScheduler
+    uses :class:`OpenEnvWrapper` whose ``reset()`` / ``step()`` / ``close()``
+    are **synchronous** (blocking WebSocket I/O).  Subclasses that override
+    ``on_trajectory_start`` / ``on_turn_end`` should wrap sync wrapper calls
+    with ``asyncio.to_thread()`` to avoid blocking the event loop.
+
+    Action parsing (LLM text → dict) and observation formatting (dict → str)
+    are handled by overridable :meth:`parse_action` and :meth:`format_observation`
+    methods, eliminating the need for ``openenv_*`` command-line parameters.
+
+    All OpenEnv configuration (``base_url``, ``system_message``, ``reset_kwargs`` …)
+    comes from the dataset's per-row ``env_config``.
+    """
+
+    def _create_env(self, env_config: Dict) -> Any:
+        """Create an :class:`OpenEnvWrapper` (not an ``Env`` subclass)."""
+        from .openenv_wrapper import OpenEnvWrapper
+        return OpenEnvWrapper(env_config)
+
+    async def _close_and_remove(self, uuid: str) -> None:
+        """Close wrapper for a given uuid and remove all associated state.
+
+        Wrapper.close() is synchronous; use ``asyncio.to_thread`` to avoid
+        blocking the event loop.
+        """
+        import asyncio
+        wrapper = self._envs.pop(uuid, None)
+        if wrapper is not None:
+            try:
+                await asyncio.to_thread(wrapper.close)
+            except Exception:
+                pass
+        self._total_rewards.pop(uuid, None)
+        self._step_rewards.pop(uuid, None)
+        self._pending_obs.pop(uuid, None)
+
+    async def on_trajectory_start(self, requests: List['RolloutInferRequest']) -> None:
+        """Create one wrapper per request, call ``reset()``, seed messages.
+
+        Uses a semaphore to limit concurrent environment creations (default 4)
+        to avoid overwhelming the OpenEnv server with simultaneous WebSocket connections.
+        """
+        semaphore = asyncio.Semaphore(getattr(self, 'max_concurrent_envs', 4))
+
+        async def _init_single(req: 'RolloutInferRequest') -> None:
+            async with semaphore:
+                uuid = req.uuid
+                if uuid in self._envs:
+                    await self._close_and_remove(uuid)
+
+                row_env_config = (req.data_dict or {}).get('env_config', {}) if hasattr(req, 'data_dict') else {}
+                env_config = {**getattr(self, 'env_config_defaults', {}), **row_env_config}
+                wrapper = self._create_env(env_config)
+
+                obs, metadata = wrapper.reset()
+                system_message = env_config.get('system_message', '')
+
+                messages: Messages = []
+                if system_message:
+                    messages.append({'role': 'system', 'content': system_message})
+                messages.append({'role': 'user', 'content': self.format_observation(obs)})
+                req.messages = messages
+
+                self._envs[uuid] = wrapper
+                self._total_rewards[uuid] = 0.0
+                self._step_rewards[uuid] = []
+                self._pending_obs[uuid] = None
+
+        await asyncio.gather(*[_init_single(req) for req in requests])
+
+    async def on_turn_end(self, infer_request: 'RolloutInferRequest', response_choice: 'ChatCompletionResponseChoice',
+                          current_turn: int) -> Dict[str, Any]:
+        """Parse LLM response, call ``wrapper.step()``, accumulate reward."""
+        uuid = infer_request.uuid
+        wrapper = self._envs.get(uuid)
+        if wrapper is None:
+            return {'done': True, 'rollout_infos': {}}
+
+        action_text = response_choice.message.content
+        action_dict = self.parse_action(action_text)
+        obs, reward, done, metadata = wrapper.step(action_dict)
+
+        self._total_rewards[uuid] = self._total_rewards.get(uuid, 0.0) + float(reward)
+        self._step_rewards.setdefault(uuid, []).append(float(reward))
+
+        next_obs = None if done else self.format_observation(obs)
+        self._pending_obs[uuid] = next_obs
+
+        rollout_infos: Dict[str, Any] = {
+            'total_reward': self._total_rewards[uuid],
+            'step_rewards': list(self._step_rewards.get(uuid, [])),
+            'gym_done': done,
+        }
+        if done:
+            await self._close_and_remove(uuid)
+
+        return {'done': done, 'rollout_infos': rollout_infos}
+
+    def parse_action(self, text: str) -> Dict[str, Any]:
+        """Parse LLM response text into an OpenEnv action dict.
+
+        Default: try ``json.loads``, fall back to ``{"message": text}``.
+        """
+        text = text.strip()
+        # Strip markdown code blocks (e.g. ```json ... ```)
+        if text.startswith('```'):
+            lines = text.splitlines()
+            if len(lines) >= 2 and lines[0].startswith('```') and lines[-1].strip().startswith('```'):
+                text = '\n'.join(lines[1:-1]).strip()
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+            return {'message': str(parsed)}
+        except (json.JSONDecodeError, ValueError):
+            return {'message': text}
+
+    def format_observation(self, observation: Any) -> str:
+        """Format OpenEnv observation into a string for the LLM.
+
+        Default: ``json.dumps``.  Override in subclasses for environment-specific
+        formatting (e.g. extract a ``"question"`` field).
+        """
+        try:
+            return json.dumps(observation, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(observation)
+
+
 multi_turns = {
     'math_tip_trick': MathTipsScheduler,
     'gym_scheduler': GYMScheduler,
+    'openenv_scheduler': OpenEnvScheduler,
     'thinking_tips_scheduler': ThinkingModelTipsScheduler,
 }

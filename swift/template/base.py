@@ -23,9 +23,11 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils import strtobool
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
-from swift.utils import Processor, ProcessorMixin, get_env_args, get_logger, remove_response, retry_decorator, to_device
+from swift.utils import (Processor, ProcessorMixin, get_env_args, get_logger, remove_arrow_padding, remove_response,
+                         retry_decorator, to_device)
 from .template_inputs import StdTemplateInputs, TemplateInputs
-from .utils import Context, ContextType, StopWordsCriteria, fetch_one, findall, get_last_user_round, split_str_parts_by
+from .utils import (Context, ContextType, StopWordsCriteria, fetch_one, findall, get_last_user_round,
+                    get_token_backed_response_ids, split_str_parts_by)
 from .vision_utils import _check_path, load_audio, load_batch, load_image, rescale_image
 
 logger = get_logger()
@@ -73,6 +75,7 @@ class Template(ProcessorMixin):
     # assistant text live in the same logical turn (e.g. Gemma4, DeepSeekV3.1), so
     # the assistant turn after a tool_response should NOT open a new thinking block.
     non_thinking_prefix_only_after_user: bool = False
+    model_accepts_loss_kwargs: Optional[bool] = None
 
     is_encoder_decoder = False
 
@@ -172,6 +175,10 @@ class Template(ProcessorMixin):
         if preserve_thinking is None:
             preserve_thinking = self.preserve_thinking
         if preserve_thinking is None:
+            # Models that keep historical thinking themselves always preserve it, unless the user
+            # explicitly opts out above.
+            preserve_thinking = self.template_meta.preserve_thinking
+        if preserve_thinking is None:
             enable_thinking = self._get_enable_thinking(inputs)
             if self.template_meta.is_thinking or enable_thinking:
                 if self.is_training and self.loss_scale.base_strategy != 'last_round':
@@ -264,6 +271,14 @@ class Template(ProcessorMixin):
                 self.dummy_model = get_model_processor(self.model_info.model_dir, return_dummy_model=True)[0]
         return self.dummy_model
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['model'] = None
+        state['dummy_model'] = None
+        state['_handles'] = []
+        state['_deepspeed_initialize'] = None
+        return state
+
     @staticmethod
     def _load_image(image, load_images: bool):
         if load_images:
@@ -325,6 +340,8 @@ class Template(ProcessorMixin):
                 inputs.tools = [agent_template._parse_json(tool) for tool in inputs.tools]
             else:
                 raise ValueError(f'inputs.tools: {inputs.tools}')
+            # Tools may also come from a request payload rather than a preprocessed dataset.
+            inputs.tools = [remove_arrow_padding(tool) if isinstance(tool, dict) else tool for tool in inputs.tools]
             for i, tool in enumerate(inputs.tools):
                 inputs.tools[i] = agent_template.wrap_tool(tool)
 
@@ -340,6 +357,8 @@ class Template(ProcessorMixin):
                     i += 1
                 tool_call_msgs = messages[i_start:i + 1]
                 tool_content = agent_template._format_tool_calls(tool_call_msgs)
+                pre_message = messages[i_start - 1] if i_start > 0 else None
+                tool_content = agent_template._add_tool_call_prefix(tool_content, pre_message)
                 merged_message = {'role': 'assistant', 'content': tool_content}
                 # Preserve loss/loss_scale fields from the first tool_call message.
                 for msg in tool_call_msgs:
@@ -351,8 +370,56 @@ class Template(ProcessorMixin):
             else:
                 i += 1
 
+    def _preprocess_standalone_tools(self, inputs: StdTemplateInputs) -> None:
+        """Fold tool observations without a preceding assistant call into the query.
+
+        The SWIFT encoder consumes alternating query/assistant pairs. A native chat
+        template can nevertheless accept a tool result directly after a user message.
+        Agent templates provide the exact observation syntax, which is appended to the
+        current query before pairing it with the following assistant response.
+        """
+        if self.template_backend != 'swift':
+            return
+        messages = inputs.messages
+        i = 0
+        while i < len(messages):
+            if (messages[i]['role'] != 'tool' or i > 0 and messages[i - 1]['role'] in {'assistant', 'tool'}):
+                i += 1
+                continue
+
+            i_start = i
+            while i + 1 < len(messages) and messages[i + 1]['role'] == 'tool':
+                i += 1
+            tool_messages = messages[i_start:i + 1]
+
+            if i_start == 0:
+                raise ValueError('A standalone tool message must follow a user message.')
+            query_message = messages[i_start - 1]
+            if query_message['role'] != 'user':
+                raise ValueError(
+                    f'A standalone tool message must follow a user message. Previous message: {query_message}')
+            query_content = query_message.get('content') or ''
+            if not isinstance(query_content, str):
+                raise ValueError('Standalone tool messages currently require text-only user content. '
+                                 f'Content: {query_content}')
+
+            agent_template = self.agent_template
+            agent_template.template_meta = self.template_meta
+            tool_context = agent_template._format_standalone_tool_responses(tool_messages)
+            if not all(isinstance(context, str) for context in tool_context):
+                raise ValueError(f'Standalone tool formatting must produce text contexts: {tool_context}')
+            query_message['content'] = query_content + ''.join(tool_context)
+            del messages[i_start:i + 1]
+            i = i_start
+
     def prepare_engine_kwargs(self) -> Dict[str, Any]:
         return {}
+
+    def prepare_pooling_params(self, pooling_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        return pooling_kwargs
+
+    def extract_embedding(self, result) -> Any:
+        return result.outputs.data.cpu().numpy().tolist()
 
     def _get_max_pixels(self, inputs=None):
         max_pixels = None if inputs is None else inputs.chat_template_kwargs.get('max_pixels')
@@ -365,7 +432,6 @@ class Template(ProcessorMixin):
         inputs: StdTemplateInputs,
     ) -> None:
         self._preprocess_tools(inputs)
-        self._preprocess_tool_call(inputs)
         if self.model_meta.is_multimodal:
             self._replace_image_tags(inputs)
             self._replace_start_image_tags(inputs)
@@ -681,7 +747,7 @@ class Template(ProcessorMixin):
             keys.update(r.keys())
             length.append(r['length'])
         for key in keys:
-            if key == 'position_ids' and is_3d_position_ids or key in {'mm_token_type_ids'}:
+            if key == 'position_ids' and is_3d_position_ids or key in {'mm_token_type_ids', 'image_token_types'}:
                 packed[key] = torch.cat([x.get(key) for x in row], dim=-1)
             elif key in {'input_ids', 'labels', 'loss_scale', 'position_ids', 'token_type_ids'}:
                 packed[key] = sum((x.get(key) or [] for x in row), start=[])
@@ -810,8 +876,12 @@ class Template(ProcessorMixin):
 
     @staticmethod
     def _save_pil_image(image: Image.Image) -> str:
+        # `Image.tobytes()` only returns the flattened pixel stream, without mode or shape.
+        # Include them in the cache key so images that share pixel bytes but differ in
+        # mode/size do not collide onto the same cached file.
         img_bytes = image.tobytes()
-        img_hash = hashlib.sha256(img_bytes).hexdigest()
+        meta = f'{image.mode}-{image.width}x{image.height}-'.encode()
+        img_hash = hashlib.sha256(meta + img_bytes).hexdigest()
         tmp_dir = os.path.join(get_cache_dir(), 'tmp', 'images')
         logger.info_once(f'create tmp_dir: {tmp_dir}')
         os.makedirs(tmp_dir, exist_ok=True)
@@ -904,6 +974,25 @@ class Template(ProcessorMixin):
     def _tokenize(self, context, **kwargs):
         return self.tokenizer(context, return_attention_mask=False, add_special_tokens=False, **kwargs)['input_ids']
 
+    def _remove_response_separator_overlap(self, response: Context,
+                                           extra_context_list: Optional[List[Context]]) -> List[Context]:
+        """Keep sampled terminal tokens while removing their overlap from a template separator."""
+        response_ids = get_token_backed_response_ids(response)
+        if not response_ids or not extra_context_list:
+            return extra_context_list or []
+        if any(not isinstance(context, str) for context in extra_context_list):
+            return extra_context_list
+
+        separator_ids = []
+        for context in extra_context_list:
+            separator_ids.extend(self._tokenize(context))
+        max_overlap = min(len(response_ids), len(separator_ids))
+        for overlap in range(max_overlap, 0, -1):
+            if response_ids[-overlap:] == separator_ids[:overlap]:
+                remaining_ids = separator_ids[overlap:]
+                return [remaining_ids] if remaining_ids else []
+        return extra_context_list
+
     def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
                     inputs: StdTemplateInputs) -> List[Context]:
         """Override this function to do your own replace operation.
@@ -924,11 +1013,9 @@ class Template(ProcessorMixin):
             return self.image_placeholder
         elif media_type == 'video':
             if self.mode == 'vllm':
-                # https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/vision_language.py
-                from vllm.assets.video import video_get_metadata, video_to_ndarrays
+                from ..vision_utils import load_vllm_video
                 num_frames = get_env_args('vllm_num_frames', int, 16)
-                video_data = video_to_ndarrays(inputs.videos[index], num_frames)
-                video_metadatas = video_get_metadata(inputs.videos[index], num_frames)
+                video_data, video_metadatas = load_vllm_video(inputs.videos[index], num_frames)
                 inputs.videos[index] = [(video_data, video_metadatas)]
                 return self.video_placeholder
             else:
@@ -1183,17 +1270,24 @@ class Template(ProcessorMixin):
             # Determine the starting index for processing messages
             # During inference or when using 'last_round' strategy, only process the last round
             # Otherwise, process all messages (start_idx = -1 means start from the beginning)
-            if not self.is_training or self.loss_scale.base_strategy == 'last_round':
+            if ((not self.is_training or self.loss_scale.base_strategy == 'last_round')
+                    and not self.template_meta.preserve_thinking):
                 start_idx = get_last_user_round(messages)
             else:
                 start_idx = -1
             for i, message in enumerate(messages):
-                if (self._is_add_non_thinking_round(messages, i, start_idx) and isinstance(message['content'], str)
-                        and not message['content'].startswith((thinking_prefix, non_thinking_prefix))):
-                    # During multi-turn SFT training/validation:
-                    # If the message has no <think> block and does not start with the non_thinking_prefix,
-                    # prepend the non_thinking_prefix to the content.
-                    message['content'] = non_thinking_prefix + message['content']
+                if not self._is_add_non_thinking_round(messages, i, start_idx):
+                    continue
+                content = message['content']
+                # After merge, content may be a list; only process the first element.
+                if isinstance(content, list):
+                    _add_prefix = content and isinstance(content[0], str) and not content[0].startswith(
+                        (thinking_prefix, non_thinking_prefix))
+                    if _add_prefix:
+                        content[0] = non_thinking_prefix + content[0]
+                elif isinstance(content, str):
+                    if not content.startswith((thinking_prefix, non_thinking_prefix)):
+                        message['content'] = non_thinking_prefix + content
 
     def _remove_thinking_content(self, content: str, thinking_suffix='</think>') -> str:
         content = content.split(thinking_suffix)[-1].strip()
@@ -1205,8 +1299,13 @@ class Template(ProcessorMixin):
         last_user_round = get_last_user_round(messages)
         for i, message in enumerate(messages):
             # Delete the content before '</think>' in all assistant turns except the last round.
-            if message['role'] == 'assistant' and isinstance(message['content'], str) and i < last_user_round:
-                message['content'] = self._remove_thinking_content(message['content'])
+            if message['role'] == 'assistant' and i < last_user_round:
+                content = message['content']
+                # After merge, content may be a list; only process the first element.
+                if isinstance(content, list) and content and isinstance(content[0], str):
+                    content[0] = self._remove_thinking_content(content[0])
+                elif isinstance(content, str):
+                    message['content'] = self._remove_thinking_content(content)
 
     def _swift_prepare_inputs(self, inputs: StdTemplateInputs):
         """
@@ -1226,6 +1325,8 @@ class Template(ProcessorMixin):
         Returns:
             None. The input messages list is updated in-place.
         """
+        self._preprocess_tool_call(inputs)
+        self._preprocess_standalone_tools(inputs)
         messages = inputs.messages
         if len(messages) < 2:
             return
@@ -1360,6 +1461,7 @@ class Template(ProcessorMixin):
                 response=response,
                 system=system,
                 round0=i)
+            extra_context_list = self._remove_response_separator_overlap(response, extra_context_list)
             res_context_list += extra_context_list
             res_context_types += [extra_context_type] * len(extra_context_list)
         if template_meta.auto_add_bos and sep_token:
@@ -1395,9 +1497,10 @@ class Template(ProcessorMixin):
             loss_scale = torch.tensor(loss_scale)[protected].tolist()
             loss_scale[0] = 0
             encoded['loss_scale'] = loss_scale
-        mm_token_type_ids = encoded.get('mm_token_type_ids')
-        if mm_token_type_ids is not None:
-            encoded['mm_token_type_ids'] = mm_token_type_ids[protected]
+        for key in ('mm_token_type_ids', 'image_token_types'):
+            token_types = encoded.get(key)
+            if token_types is not None:
+                encoded[key] = token_types[protected]
         return input_ids, labels
 
     @staticmethod
@@ -1533,6 +1636,8 @@ class Template(ProcessorMixin):
                 encoded['length'] += padding_len
             if encoded.get('mm_token_type_ids') is not None:
                 encoded['mm_token_type_ids'] = F.pad(encoded['mm_token_type_ids'], (0, padding_len), value=0)
+            if encoded.get('image_token_types') is not None:
+                encoded['image_token_types'] = F.pad(encoded['image_token_types'], (0, padding_len), value=-1)
 
     def debug_logger(self, inputs):
         if not strtobool(os.getenv('SWIFT_DEBUG', 'false')):
@@ -1587,7 +1692,8 @@ class Template(ProcessorMixin):
         for k, v in old_kwargs.items():
             if k in {
                     'input_ids', 'attention_mask', 'labels', 'position_ids', 'output_hidden_states', 'logits_to_keep',
-                    'max_length_q', 'max_length_k', 'cu_seq_lens_q', 'cu_seq_lens_k', 'mm_token_type_ids'
+                    'output_router_logits', 'max_length_q', 'max_length_k', 'cu_seq_lens_q', 'cu_seq_lens_k',
+                    'mm_token_type_ids', 'image_token_types'
             } and k not in kwargs:
                 kwargs[k] = v
         if 'inputs_embeds' in kwargs:
@@ -1724,8 +1830,9 @@ class Template(ProcessorMixin):
         res = self._data_collator(new_batch, padding_to=padding_to)
 
         # reward modeling
-        margin = [b['margin'] for b in batch if b.get('margin') is not None]
-        if margin:
+        has_margin = any(b.get('margin') is not None for b in batch)
+        if has_margin:
+            margin = [0.0 if b.get('margin') is None else b['margin'] for b in batch]
             res['margin'] = torch.tensor(margin, dtype=torch.float)
 
         return res
@@ -1865,7 +1972,9 @@ class Template(ProcessorMixin):
                 encoded['position_ids'] = list(range(len(val)))
 
         res = {}
-        gather_keys = ['labels', 'loss_scale', 'position_ids', 'token_type_ids', 'mm_token_type_ids']
+        gather_keys = [
+            'labels', 'loss_scale', 'position_ids', 'token_type_ids', 'mm_token_type_ids', 'image_token_types'
+        ]
         if self.padding_free:
             assert len(batch) == 1, f'batch: {batch}'
             for k in ['input_ids', 'channel'] + gather_keys:
@@ -1895,7 +2004,7 @@ class Template(ProcessorMixin):
             'attention_mask',
             'attention_mask_2d',
         ] + gather_keys
-        pad_values = [self.tokenizer.pad_token_id, 0., 0, 0] + [-100, 0., 0, 0, 0]
+        pad_values = [self.tokenizer.pad_token_id, 0., 0, 0] + [-100, 0., 0, 0, 0, -1]
         # Convert to tensor and remove unnecessary dimensions.
         seq_lens = None
         for key in pad_keys:

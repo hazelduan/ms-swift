@@ -62,6 +62,12 @@ class ChatGLM4AgentTemplate(BaseAgentTemplate):
         res.append('<|assistant|>\n')
         return assistant_content, res
 
+    def _format_standalone_tool_responses(self, tool_messages) -> 'Prompt':
+        res = []
+        for tool_message in tool_messages:
+            res.extend(['<|observation|>\n', tool_message['content']])
+        return res
+
     def _format_tool_calls(self, tool_call_messages) -> str:
         tool_calls = []
         for message in tool_call_messages:
@@ -154,12 +160,25 @@ class GLM4_5AgentTemplate(BaseAgentTemplate):
             res.append('<|assistant|>')
         return assistant_content, res
 
+    def _format_standalone_tool_responses(self, tool_messages) -> 'Prompt':
+        res = ['<|observation|>']
+        for tool_message in tool_messages:
+            tool_content = tool_message['content']
+            if self.model_type == 'glm4_5':
+                res.append(f'\n<tool_response>\n{tool_content}\n</tool_response>')
+            elif self.model_type in {'glm4_7', 'glm5_1'}:
+                res.append(f'<tool_response>{tool_content}</tool_response>')
+        return res
+
     def _format_tool_calls(self, tool_call_messages) -> str:
         tool_calls = []
         for message in tool_call_messages:
             tool_call = self._parse_tool_call(message['content'])
             tool_calls.append(f"<tool_call>{tool_call['name']}")
             for arg_key, arg_value in tool_call['arguments'].items():
+                if not isinstance(arg_value, str):
+                    # `{{ v | tojson(ensure_ascii=False) if v is not string else v }}`
+                    arg_value = json.dumps(arg_value, ensure_ascii=False)
                 tool_calls.append(f'<arg_key>{arg_key}</arg_key>')
                 tool_calls.append(f'<arg_value>{arg_value}</arg_value>')
             tool_calls.append('</tool_call>')

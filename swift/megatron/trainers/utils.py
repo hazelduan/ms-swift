@@ -335,6 +335,10 @@ class MegatronDataLoaderDispatcher(DataLoaderDispatcher):
 
 
 def build_streaming_dataloader(args, dataset, collate_fn):
+    dataloader_kwargs = {}
+    mp_context = getattr(args, 'dataloader_multiprocessing_context', None)
+    if mp_context is not None and args.dataloader_num_workers > 0:
+        dataloader_kwargs['multiprocessing_context'] = mp_context
     base_dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=args.dataloader_num_workers,
@@ -343,14 +347,33 @@ def build_streaming_dataloader(args, dataset, collate_fn):
         batch_size=args.micro_batch_size,
         prefetch_factor=args.dataloader_prefetch_factor if args.dataloader_num_workers > 0 else None,
         persistent_workers=args.dataloader_persistent_workers if args.dataloader_num_workers > 0 else False,
+        **dataloader_kwargs,
     )
     return MegatronDataLoaderDispatcher(base_dataloader)
 
 
-def _should_use_npu_attention_mask(args) -> bool:
+_NPU_ATTENTION_MASK_2D_MODEL_TYPES = {'qwen3_5', 'qwen3_5_moe'}
+
+
+def _should_use_npu_generated_attention_mask(args) -> bool:
     from transformers.utils import is_torch_npu_available
-    return (is_torch_npu_available() and args.task_type == 'causal_lm' and not args.padding_free
-            and getattr(args, 'attention_backend', None) != 'local' and getattr(args, 'use_flash_attn', False))
+    if not is_torch_npu_available():
+        return False
+    if args.task_type != 'causal_lm' or args.padding_free:
+        return False
+    if getattr(args, 'attention_backend', None) == 'local':
+        return False
+    return bool(getattr(args, 'use_flash_attn', False))
+
+
+def _prepare_npu_generated_attention_mask(batch, *, keep_attention_mask_2d: bool) -> None:
+    if keep_attention_mask_2d:
+        attention_mask = batch.get('attention_mask')
+        if 'attention_mask_2d' not in batch and attention_mask is not None:
+            batch['attention_mask_2d'] = (attention_mask == 0).sum(dim=(1, 2)) > 0
+    else:
+        batch.pop('attention_mask_2d', None)
+    batch['attention_mask'] = None
 
 
 def prepare_batch(args, data, vp_stage=None):
@@ -370,18 +393,18 @@ def prepare_batch(args, data, vp_stage=None):
     text_position_ids = batch.pop('text_position_ids', None)
     if text_position_ids is None:
         text_position_ids = batch.get('position_ids')
-    if _should_use_npu_attention_mask(args):
-        if 'attention_mask_2d' not in batch and batch.get('attention_mask') is not None:
-            batch['attention_mask_2d'] = (~batch['attention_mask']).sum(dim=(1, 2)) > 0
-        batch['attention_mask'] = None
+    if _should_use_npu_generated_attention_mask(args):
+        _prepare_npu_generated_attention_mask(
+            batch, keep_attention_mask_2d=getattr(args, 'model_type', None) in _NPU_ATTENTION_MASK_2D_MODEL_TYPES)
     else:
         batch.pop('attention_mask_2d', None)
     if args.padding_free and text_position_ids is not None:
-        batch['packed_seq_params'] = get_packed_seq_params(text_position_ids)
+        batch['packed_seq_params'] = get_packed_seq_params(args, text_position_ids)
         if seq_lens is not None:
             batch['packed_seq_params'].seq_lens = torch.tensor(seq_lens, device=text_position_ids.device)
         if num_samples is not None:
             batch['packed_seq_params'].num_samples = num_samples
+    batch.setdefault('attention_mask', None)
     batch = get_batch_on_this_cp_rank(args, batch)
     return batch
 
@@ -404,8 +427,11 @@ def compute_per_token_logps_fn(model, args, data_iterator, temperature=1.0, no_g
     global_topk_idx = data.pop('routed_experts', None)
     if enable_routing_replay and RouterReplayHelper.is_replay_forward_action(model.config):
         assert global_topk_idx is not None, 'When router_replay_mode = R3, routed_experts must be in data'
-        routing_topk_idx = get_local_topk_idx_for_current_rank(global_topk_idx, model.config,
-                                                               data.get('packed_seq_params'))
+        routing_topk_idx = get_local_topk_idx_for_current_rank(
+            global_topk_idx,
+            model.config,
+            data.get('packed_seq_params'),
+            cp_partition_mode=getattr(args, 'cp_partition_mode', 'zigzag'))
         set_router_replay_data(routing_topk_idx, model.config)
 
     data_for_forward = {k: v for k, v in data.items() if k != 'labels'}
@@ -439,11 +465,11 @@ def compute_per_token_logps_fn(model, args, data_iterator, temperature=1.0, no_g
 
     if args.context_parallel_size > 1:
         per_token_logps = reconstruct_tensor_cp(args.context_parallel_size, per_token_logps, packed_seq_params,
-                                                num_samples)
+                                                num_samples, args.cp_partition_mode)
     return per_token_logps, routing_topk_idx
 
 
-def reconstruct_tensor_cp(cp_size, tensor, packed_seq_params, num_samples):
+def reconstruct_tensor_cp(cp_size, tensor, packed_seq_params, num_samples, cp_partition_mode='zigzag'):
     """In CP mode, all_gather and reconstruct full tensor sequences."""
     cp_rank = mpu.get_context_parallel_rank()
 
@@ -451,6 +477,13 @@ def reconstruct_tensor_cp(cp_size, tensor, packed_seq_params, num_samples):
     output_list = [torch.empty_like(tensor) for _ in range(cp_size)]
     torch.distributed.all_gather(output_list, tensor.contiguous(), group=mpu.get_context_parallel_group())
     output_list[cp_rank] = tensor
+
+    if cp_partition_mode == 'contiguous':
+        # Contiguous CP splits the entire flattened packed sequence across ranks.
+        output_full = torch.cat(output_list, dim=1)
+        if packed_seq_params is not None:
+            output_full = output_full[:, :packed_seq_params.cu_seqlens_q[num_samples].item()]
+        return output_full
 
     if packed_seq_params is not None:
         cu_seqlens_full = packed_seq_params.cu_seqlens_q

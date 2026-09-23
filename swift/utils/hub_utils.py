@@ -1,7 +1,9 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import hashlib
 import importlib.util
 import os
 import requests
+import tempfile
 from modelscope.hub.api import HubApi, ModelScopeConfig
 from modelscope.hub.utils.utils import get_cache_dir
 from pathlib import Path
@@ -79,7 +81,7 @@ def safe_snapshot_download(model_id_or_path: str,
             '*.ot', '*.h5'
         ]
     if not download_model:
-        ignore_patterns += ['*.bin', '*.safetensors']
+        ignore_patterns = [*ignore_patterns, '*.bin', '*.safetensors']
     hub = get_hub(use_hf)
     if model_id_or_path.startswith('~'):
         model_id_or_path = os.path.abspath(os.path.expanduser(model_id_or_path))
@@ -154,10 +156,15 @@ def git_clone_github(github_url: str,
 def download_ms_file(url: str, local_path: str, cookies=None) -> None:
     if cookies is None:
         cookies = ModelScopeConfig.get_cookies()
-    resp = requests.get(url, cookies=cookies, stream=True)
-    with open(local_path, 'wb') as f:
-        for data in tqdm(resp.iter_lines()):
-            f.write(data)
+    with requests.get(url, cookies=cookies, stream=True) as resp:
+        resp.raise_for_status()
+        total_size = int(resp.headers.get('content-length', 0))
+        with open(local_path, 'wb') as f, tqdm(
+                total=total_size, unit='B', unit_scale=True, unit_divisor=1024,
+                desc=os.path.basename(local_path)) as pbar:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+                pbar.update(len(chunk))
 
 
 def _resolve_kernel_variant_str(repo_id: str) -> Optional[str]:
@@ -217,6 +224,7 @@ def patch_kernels() -> bool:
             allow_patterns = [f'build/{variant_str}/*'] if variant_str else None
             model_dir = safe_snapshot_download(repo_id, use_hf=False, allow_patterns=allow_patterns)
             package_name = repo_id.split('/')[-1].replace('-', '_')
+            # kernels < 0.14
             kernel = get_local_kernel(Path(model_dir), package_name)
             logger.info(f'Loaded kernel `{repo_id}` from ModelScope: {model_dir}')
             return kernel
@@ -226,3 +234,31 @@ def patch_kernels() -> bool:
 
     hub_kernels.get_kernel = patched_get_kernel
     return True
+
+
+def download_file(url: str) -> str:
+    url = url.rstrip('/')
+    file_name = url.rsplit('/', 1)[-1]
+    file_stem, file_suffix = os.path.splitext(file_name)
+    file_name = f'{file_stem}-{hashlib.sha256(url.encode("utf-8")).hexdigest()}{file_suffix}'
+    cache_dir = os.path.join(get_cache_dir(), 'files')
+    os.makedirs(cache_dir, exist_ok=True)
+    file_path = os.path.join(cache_dir, file_name)
+    if os.path.exists(file_path):
+        return file_path
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=cache_dir, prefix=f'.{file_name}.', suffix='.tmp', delete=False) as f:
+            temp_path = f.name
+            with requests.get(url, stream=True) as resp:
+                resp.raise_for_status()
+                total_size = int(resp.headers.get('content-length', 0))
+                with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024, desc=file_name) as pbar:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+        os.replace(temp_path, file_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+    return file_path

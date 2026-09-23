@@ -15,7 +15,8 @@ from swift.ray_utils import RayArguments
 from swift.template import Template, get_template
 from swift.tuner_plugin import tuners_map
 from swift.utils import (Processor, check_json_format, get_dist_setting, get_logger, import_external_file, is_dist,
-                         is_master, json_parse_to_dict, safe_snapshot_download, set_device, use_hf_hub)
+                         is_master, json_parse_to_dict, patch_dataloader_external_plugins, safe_snapshot_download,
+                         set_device, use_hf_hub)
 from .data_args import DataArguments
 from .generation_args import GenerationArguments
 from .model_args import ModelArguments
@@ -23,6 +24,33 @@ from .quant_args import QuantizeArguments
 from .template_args import TemplateArguments
 
 logger = get_logger()
+
+# Environment variable blacklist
+_BLOCKED_MODEL_KWARGS = {
+    # Python interpreter
+    'PYTHONPATH',  # module search path injection (used in RCE exploit chain)
+    'PYTHONHOME',  # Python installation redirect
+    'PYTHONSTARTUP',  # auto-executed on interpreter startup
+    'PYTHONBREAKPOINT',  # arbitrary callable for breakpoint()
+    'PYTHONINSPECT',  # force interactive mode after script
+    # Dynamic linker injection (Linux)
+    'LD_PRELOAD',  # shared library injection
+    'LD_AUDIT',  # audit library injection
+    # Dynamic linker injection (macOS)
+    'DYLD_INSERT_LIBRARIES',
+    'DYLD_LIBRARY_PATH',
+    'DYLD_FALLBACK_LIBRARY_PATH',
+    # Shell auto-execution
+    'BASH_ENV',  # auto-sourced by non-interactive bash
+    'ENV',  # auto-sourced by some shells (POSIX sh)
+    'ZDOTDIR',  # zsh config directory redirect
+    # Other interpreters
+    'PERL5OPT',
+    'PERL5LIB',
+    'PERLLIB',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+}
 
 
 def get_supported_tuners():
@@ -74,6 +102,10 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
         packing (bool): Whether to enable packing of datasets. Default is False.
         packing_length (Optional[int]): Length of packing. Default is None.
         packing_num_proc (int): Number of processes used for packing, Default is 1.
+        packing_strategy (Literal['binpack', 'sequential']): Packing algorithm. 'binpack' (default) uses
+            best-fit-decreasing bin packing (reorders samples); 'sequential' uses order-preserving greedy
+            packing (next-fit: a single open pack, flushed when the next sample doesn't fit) so the sample
+            order / pack boundaries follow a sequential sampler (use packing_num_proc=1). Default is 'binpack'.
         lazy_tokenize (Optional[bool]): Whether to enable lazy tokenization. Default is None.
         use_hf (bool): Whether to use Hugging Face for downloading/uploading models and datasets. If False,
             ModelScope is used. Default is False.
@@ -101,6 +133,7 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
     packing: bool = False
     packing_length: Optional[int] = None
     packing_num_proc: int = 1
+    packing_strategy: Literal['binpack', 'sequential'] = 'binpack'
     lazy_tokenize: Optional[bool] = None
     # hub
     use_hf: bool = False
@@ -147,6 +180,9 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
             return
         for external_plugin in self.external_plugins:
             import_external_file(external_plugin)
+        # A plugin's effect is an import side effect, which a forkserver/spawn dataloader worker does not
+        # inherit. Only patch when there is something to replay.
+        patch_dataloader_external_plugins()
         logger.info(f'Successfully imported external_plugins: {self.external_plugins}.')
 
     @staticmethod
@@ -198,10 +234,18 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
             logger.info('hub login successful!')
 
     def _init_model_kwargs(self):
-        """Prepare model kwargs and set them to the env"""
+        """Prepare model kwargs and set them to the env.
+
+        Blocks known-dangerous environment variables (PYTHONPATH, LD_PRELOAD,
+        etc.) that could enable arbitrary code execution via module/library
+        injection.
+        """
         self.model_kwargs: Dict[str, Any] = json_parse_to_dict(self.model_kwargs)
         for k, v in self.model_kwargs.items():
             k = k.upper()
+            if k in _BLOCKED_MODEL_KWARGS:
+                logger.warning(f'model_kwargs: `{k}` is blocked for security reasons, skipping')
+                continue
             os.environ[k] = str(v)
 
     @property

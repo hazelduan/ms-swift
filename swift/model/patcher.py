@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 from accelerate.utils import find_device
+from collections.abc import Mapping
 from contextlib import contextmanager
 from functools import wraps
 from packaging import version
@@ -27,6 +28,37 @@ logger = get_logger()
 
 transformers_version = version.parse(transformers.__version__)
 transformers_5 = transformers_version >= version.parse('5.0.0')
+
+
+def patch_frozen_module(module: nn.Module):
+    """Avoid input-grad hooks retaining a graph for a fully frozen encoder.
+
+    Keep autograd when any parameter or input needs gradients, including after
+    unfreezing the encoder. Do not remove hooks needed by trainable adapters.
+    """
+    if hasattr(module, '_swift_frozen_module_forward'):
+        return
+    module._swift_frozen_module_forward = module.forward
+
+    def needs_input_grad(value):
+        if isinstance(value, torch.Tensor):
+            return value.requires_grad
+        if isinstance(value, Mapping):
+            return any(needs_input_grad(v) for v in value.values())
+        if isinstance(value, (tuple, list)):
+            return any(needs_input_grad(v) for v in value)
+        # Unknown containers may carry differentiable tensors: leave them alone.
+        return not isinstance(value, (type(None), bool, int, float, str, torch.dtype, torch.device))
+
+    @wraps(module.forward)
+    def frozen_forward(self, *args, **kwargs):
+        requires_grad = torch.is_grad_enabled()
+        if requires_grad:
+            requires_grad = any(p.requires_grad for p in self.parameters()) or needs_input_grad((args, kwargs))
+        with torch.set_grad_enabled(requires_grad):
+            return self._swift_frozen_module_forward(*args, **kwargs)
+
+    module.forward = MethodType(frozen_forward, module)
 
 
 def patch_fixed_float_dtype(module: torch.nn.Module, dtype):
@@ -540,7 +572,9 @@ def revert_padding_free(outputs: Dict[str, Any], inputs: Dict[str, Any], padding
 
     seq_lengths = []
     pos = position_ids[0]
-    resets = torch.where(pos[1:] < pos[:-1])[0] + 1
+    # A length-1 sequence contributes a lone 0, so equality marks a boundary as well. The -1 slots
+    # padded by sequence parallel belong to no sequence and must not open one.
+    resets = torch.where((pos[1:] <= pos[:-1]) & (pos[1:] >= 0))[0] + 1
 
     if len(resets) == 0:
         # Only one sequence in this batch item
@@ -551,7 +585,7 @@ def revert_padding_free(outputs: Dict[str, Any], inputs: Dict[str, Any], padding
         for end in resets:
             seq_lengths.append(end - start)
             start = end
-        seq_lengths.append(pos.shape[0] - start)
+        seq_lengths.append(int((pos >= 0).sum()) - start)
 
     max_length = max(seq_lengths)
     unpacked_logits = []
@@ -593,6 +627,8 @@ def gather_sequence_parallel_outputs(
     for key in tensor_keys:
         if key in outputs:
             outputs[key] = GatherTensor.apply(outputs[key], 1, position_ids)
+            if position_ids is not None:
+                outputs[key] = outputs[key][:, position_ids[0] >= 0]
 
     return outputs
 
