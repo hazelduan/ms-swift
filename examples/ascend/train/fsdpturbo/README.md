@@ -9,12 +9,13 @@ Install Swift's requirements and a compatible FSDPTurbo package in the active en
 Load your CANN environment, activate your training environment, and select eight available logical NPU devices. Then run from this checkout:
 
 ```bash
+PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
 NPROC_PER_NODE=8 MASTER_PORT=29501 swift fsdpturbo sft \
   --model Qwen/Qwen3.5-35B-A3B \
   --dataset /path/to/train.jsonl \
   --output_dir /path/to/output \
   --tuner_type full --torch_dtype bfloat16 --attn_impl eager \
-  --fsdp_size 8 --tp_size 1 --ep_size 4 --efsdp_size 2 \
+  --fsdp_size 8 --tp_size 1 --ep_size 8 --efsdp_size 1 \
   --fsdp_implementation native --ep_dispatcher eager \
   --forward_prefetch 0 --backward_prefetch 0 \
   --max_steps 20 --max_length 128 \
@@ -30,12 +31,13 @@ The outer CLI forwards to a secondary router which starts exactly one torchrun l
 
 `WORLD_SIZE` must be divisible by both `fsdp_size * tp_size` and `ep_size * efsdp_size`. These are overlapping meshes; do not multiply all four sizes to calculate world size. `efsdp_size > 1` requires `ep_size > 1`.
 
-Eight-device validation configurations:
+Eight-device topology configurations (see the capacity results below):
 
 | FSDP | TP | EP | EFSDP | Local batch | Global batch |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 8 | 1 | 1 | 1 | 1 | 8 |
 | 8 | 1 | 4 | 2 | 1 | 8 |
+| 8 | 1 | 8 | 1 | 1 | 8 |
 | 4 | 2 | 1 | 1 | 2 | 8 |
 | 4 | 2 | 4 | 2 | 2 | 8 |
 
@@ -46,3 +48,11 @@ The model-spec registry currently contains Qwen3.5 MoE only. Every required FSDP
 This initial backend requires full causal-LM SFT, a map-style dataset, positive `max_steps`, gradient accumulation of one, AdamW, eager attention and `save_strategy=no`. It writes resolved arguments and training metrics. Checkpoint save/resume, evaluation, LoRA, PP, CP and packing are not validated; unsupported switches are rejected where exposed. CPU offload, other dispatchers, multimodal batches and CUDA need separate validation.
 
 The eight-device smoke/trajectory results establish only the tested short-sequence full-SFT configurations. They do not establish long-context throughput, convergence or checkpoint correctness. See the experiment report for exact revisions, CANN version, data, loss/gradient curves and limitations.
+
+## CANN 9.1.0 capacity results
+
+On eight Ascend910_9382 logical NPU devices, the full Qwen3.5-35B-A3B checkpoint completed 20 steps with FSDP8 and FSDP8+EP8+EFSDP1. Both used sequence length 128, recompute, disabled prefetch and expandable allocator segments. Full-model FSDP8+EP4+EFSDP2, FSDP4+TP2 and FSDP4+TP2+EP4+EFSDP2 exhausted device memory on this setup. CPU offload failed on CPU tensor communication with the current process groups. These are known limits of this tested configuration.
+
+The adapter initializes its loss-reduction communicator during setup, before backward fills the device allocator cache. This reserves HCCL communication buffers before first-step loss reduction; it does not change the loss, gradients or optimizer.
+
+A separate 4-layer checkpoint derived from the pretrained model (4.828B parameters, original 256 experts and original projection widths) completed 20 steps on all four FSDP/TP/EP/EFSDP combinations in the table. Its paired loss and gradient-norm comparisons passed the predeclared thresholds. This fixture result establishes topology integration; the full-model capacity failures above remain known limitations.
