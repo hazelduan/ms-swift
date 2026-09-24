@@ -64,6 +64,32 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
     tuner_type: Literal['full'] = 'full'
     add_version: bool = False
 
+    def _init_device(self):
+        super()._init_device()
+        from swift.utils import init_process_group, is_dist
+
+        if not self.offload_params or not is_dist():
+            return
+        import torch
+        import torch.distributed as dist
+
+        device = torch.accelerator.current_accelerator()
+        if device is None or device.type == 'cpu':
+            return
+        accelerator_backend = dist.get_default_backend_for_device(device)
+        if self.ddp_backend not in (None, accelerator_backend):
+            raise ValueError('FSDPTurbo CPU offload requires ddp_backend to be unset or use '
+                             f'the accelerator backend ({accelerator_backend}).')
+        if dist.is_initialized():
+            backends = dict(item.split(':') for item in dist.get_backend_config().split(','))
+            if 'cpu' not in backends or device.type not in backends:
+                raise ValueError('FSDPTurbo CPU offload requires a process group with both CPU and accelerator '
+                                 'backends; initialize that process group before constructing training arguments.')
+            return
+        # Accelerate otherwise initializes an accelerator-only group. Mesh
+        # subgroups must also reduce CPU gradient norms after FSDP offload.
+        init_process_group(backend=f'cpu:gloo,{device.type}:{accelerator_backend}', timeout=self.ddp_timeout)
+
     def __post_init__(self) -> None:
         self.validate_fsdpturbo()
         if self.enable_npu_model_patch:
