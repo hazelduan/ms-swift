@@ -55,6 +55,7 @@ python -m pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 \
   --index-url https://download.pytorch.org/whl/cpu
 python -m pip install torch-npu==2.9.0
 python -m pip install transformers==5.9.0 accelerate==1.13.0 datasets==4.8.4 safetensors==0.7.0
+python -m pip install trl==0.29.1 peft==0.18.1 numpy==1.26.4
 
 # Ascend Triton 请使用集群已有的匹配 wheel；当前实验是以下版本。
 python -m pip install triton==3.2.0 triton-ascend==3.2.1
@@ -74,6 +75,26 @@ from fsdp_turbo.fsdp_turbo import FSDPTurbo
 from fsdp_turbo.distributed.parallel_state import reset_parallel_state
 print('backend imports OK')
 PY
+```
+
+本次 A3 `115.190.166.102` 使用的实际路径：
+
+| 项目 | 路径 / 版本 |
+| --- | --- |
+| Swift workspace | `/home/dxq/.codex_work/ms-swift-fsdpturbo-release`，`fsdpturbo_backend`，`4.6.0.dev0` |
+| Turbo workspace | `/home/dxq/fsdpturbo`，`swift-fsdpturbo-compat`，包声明 `0.1.0`，以 Git SHA 为准 |
+| conda / Python | `/home/dxq/envs/dxq_swift_ascend_py311`，Python `3.11.15` |
+| CANN | `/usr/local/Ascend/cann -> /usr/local/Ascend/cann-9.0.0`，`9.0.0` / `V100R001C10SPC001B250` |
+| torch / torch_npu | conda 下 `lib/python3.11/site-packages/torch` / `torch_npu`，`2.9.0+cpu` / `2.9.0` |
+| Transformers / Accelerate | 同一 conda 的 `site-packages/transformers` / `accelerate`，`5.9.0` / `1.13.0` |
+| datasets overlay | `/home/dxq/experiments/swift_fsdpturbo_cann91_20260923/dependencies/datasets`，`4.8.4` |
+
+该环境保留了历史依赖 overlay；复现本次 source checkout 时使用以下导入顺序，不能让 overlay 内的旧 Turbo 副本排在 workspace 前面。新建并按上文安装的环境不需要这个历史 overlay。
+
+```bash
+conda activate /home/dxq/envs/dxq_swift_ascend_py311
+source /usr/local/Ascend/cann/set_env.sh
+export PYTHONPATH=/home/dxq/.codex_work/ms-swift-fsdpturbo-release:/home/dxq/fsdpturbo:/home/dxq/experiments/swift_fsdpturbo_cann91_20260923/dependencies
 ```
 
 ## 模型与数据
