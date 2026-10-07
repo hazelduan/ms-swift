@@ -4,6 +4,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
+import torch
 from torch import nn
 
 from swift.fsdpturbo.model_specs import get_model_spec
@@ -25,6 +26,9 @@ class _DecoderLayer(nn.Module):
     def __init__(self, *, with_tp=True, with_experts=True):
         super().__init__()
         self.self_attn = _Attention(with_tp=with_tp)
+        self.linear_attn = nn.Module()
+        self.linear_attn.A_log = nn.Parameter(torch.ones(2, dtype=torch.float32))
+        self.linear_attn.norm = nn.LayerNorm(2, dtype=torch.float32)
         self.mlp = nn.Module()
         if with_experts:
             self.mlp.experts = nn.ModuleList([nn.Linear(2, 2, bias=False)])
@@ -84,6 +88,7 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
             'ep_modules': 1,
             'efsdp_modules': 1,
             'recompute_modules': 2,
+            'replicated_params': 2,
         }
 
         for group, count in expected_counts.items():
@@ -99,7 +104,7 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
         spec = get_model_spec(model)
 
         matches = spec.validate_model(model)
-        self.assertEqual(set(matches), {'fsdp_modules', 'fsdp_hook_modules'})
+        self.assertEqual(set(matches), {'fsdp_modules', 'fsdp_hook_modules', 'replicated_params'})
         with self.assertRaises(RuntimeError):
             spec.validate_model(model, require_tp=True)
         with self.assertRaises(RuntimeError):

@@ -90,8 +90,13 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
             expert_fully_shard_parallel_size=args.efsdp_size,
             fsdp_plan=FSDPPlanConfig(
                 ignored_modules=[],
+                ignored_params=list(spec.replicated_params),
                 apply_modules={pattern: {} for pattern in spec.fsdp_modules},
-                param_dtype=dtype,
+                # Swift's loader already materializes ordinary weights in the
+                # requested dtype while preserving numerically sensitive
+                # checkpoint parameters (for example Qwen3.5 A_log) in fp32.
+                # A global FSDP param cast would erase that mixed-dtype policy.
+                param_dtype=None,
                 reduce_dtype='fp32',
                 output_dtype=dtype,
                 num_to_forward_prefetch=args.forward_prefetch,
@@ -128,6 +133,7 @@ class FSDPTurboTrainer(BaseTrainer):
         self.template = template
         self.train_dataset = train_dataset
         self.spec = get_model_spec(args.model_type)
+        self._replicated_parameters = []
         super().__init__(config=build_fsdpturbo_config(args, self.spec))
         self.processor = processor
 
@@ -171,14 +177,15 @@ class FSDPTurboTrainer(BaseTrainer):
         if processor is not None:
             self.processor = processor
         model = TunerMixin.prepare_model(self.args, model, template=self.template, train_dataset=self.train_dataset)
-        from fsdp_turbo.utils.model import convert_model_dtype
-        convert_model_dtype(model, self.config.model.torch_dtype)
         self.spec.validate_model(
             model,
             require_tp=self.args.tp_size > 1,
             require_ep=self.args.ep_size > 1,
             require_recompute=self.args.gradient_checkpointing,
         )
+        parameter_matches = self.spec.matching_parameters(model, self.spec.replicated_params)
+        parameter_names = {name for names in parameter_matches.values() for name in names}
+        self._replicated_parameters = [param for name, param in model.named_parameters() if name in parameter_names]
         if hasattr(model.config, 'use_cache'):
             model.config.use_cache = False
         self.template.model = model
@@ -186,7 +193,26 @@ class FSDPTurboTrainer(BaseTrainer):
         from fsdp_turbo.fsdp_turbo import FSDPTurbo
 
         logger.info('Applying the independent FSDPTurbo parallel backend.')
-        return FSDPTurbo(self.config, model)
+        model = FSDPTurbo(self.config, model)
+        for param in self._replicated_parameters:
+            param.data = param.data.to(self.train_args.device)
+        return model
+
+    def _sync_replicated_gradients(self):
+        if not self._replicated_parameters or not dist.is_initialized():
+            return
+        world_size = dist.get_world_size()
+        if world_size == 1:
+            return
+        for param in self._replicated_parameters:
+            if param.grad is None:
+                continue
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad.div_(world_size)
+
+    def _on_optimizer_step(self):
+        self._sync_replicated_gradients()
+        return super()._on_optimizer_step()
 
     def build_dataloader(self):
         if self.train_dataset is None:

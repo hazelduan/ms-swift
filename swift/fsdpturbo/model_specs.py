@@ -15,12 +15,20 @@ class FSDPTurboModelSpec:
     ep_modules: Tuple[str, ...]
     efsdp_modules: Tuple[str, ...]
     recompute_modules: Tuple[str, ...]
+    replicated_params: Tuple[str, ...] = ()
 
     @staticmethod
     def matching_modules(model: nn.Module, patterns: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
         from fsdp_turbo.utils.str_match import module_name_match
 
         names = tuple(name for name, _ in model.named_modules())
+        return {pattern: tuple(name for name in names if module_name_match(pattern, name)) for pattern in patterns}
+
+    @staticmethod
+    def matching_parameters(model: nn.Module, patterns: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+        from fsdp_turbo.utils.str_match import module_name_match
+
+        names = tuple(name for name, _ in model.named_parameters())
         return {pattern: tuple(name for name in names if module_name_match(pattern, name)) for pattern in patterns}
 
     def validate_model(self,
@@ -47,6 +55,8 @@ class FSDPTurboModelSpec:
             groups['recompute_modules'] = self.recompute_modules
 
         matches = {name: self.matching_modules(model, patterns) for name, patterns in groups.items()}
+        if self.replicated_params:
+            matches['replicated_params'] = self.matching_parameters(model, self.replicated_params)
         missing = [f'{group}:{pattern}' for group, result in matches.items() for pattern, names in result.items()
                    if not names]
         if missing:
@@ -72,6 +82,10 @@ _MODEL_SPECS = {
         ep_modules=('model.language_model.layers.{*}.mlp.experts', ),
         efsdp_modules=('model.language_model.layers.{*}.mlp.experts', ),
         recompute_modules=('model.language_model.layers.{*}', 'model.visual.blocks.{*}'),
+        replicated_params=(
+            'model.language_model.layers.{*}.linear_attn.A_log',
+            'model.language_model.layers.{*}.linear_attn.norm.weight',
+        ),
     ),
 }
 

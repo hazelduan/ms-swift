@@ -54,6 +54,7 @@ class TestFSDPTurboArguments(unittest.TestCase):
         cases = {
             'pipeline_parallelism': dict(pp_size=2),
             'efsdp_without_ep': dict(efsdp_size=2, ep_size=1),
+            'tp_with_custom_fsdp': dict(tp_size=2, fsdp_implementation='custom'),
         }
         for name, kwargs in cases.items():
             with self.subTest(name=name), self.assertRaises(ValueError):

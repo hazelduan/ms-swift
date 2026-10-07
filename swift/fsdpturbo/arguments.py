@@ -39,6 +39,8 @@ class FSDPTurboArguments:
                 'Adding PP outside the backend would build FSDP/EP meshes across pipeline stages.')
         if self.efsdp_size > 1 and self.ep_size == 1:
             raise ValueError('efsdp_size > 1 requires ep_size > 1 in FSDPTurbo.')
+        if self.tp_size > 1 and self.fsdp_implementation != 'native':
+            raise ValueError('FSDPTurbo TP requires the native composable FSDP implementation.')
         if self.forward_prefetch < 0 or self.backward_prefetch < 0:
             raise ValueError('FSDPTurbo prefetch counts must be non-negative.')
 
