@@ -99,9 +99,9 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.add_version:
             raise ValueError('FSDPTurbo requires a shared explicit output_dir; `--add_version` must be false.')
         if self.resume_only_model:
-            raise ValueError('The initial FSDPTurbo backend does not support checkpoint resume yet.')
-        if self.resume_from_checkpoint:
-            raise ValueError('The initial FSDPTurbo backend does not support checkpoint resume yet.')
+            raise ValueError('FSDPTurbo resumes model and optimizer state; resume_only_model is not supported.')
+        if self.resume_from_checkpoint and self.ignore_data_skip:
+            raise ValueError('FSDPTurbo resume restores the data cursor; ignore_data_skip is not supported.')
         if self.fsdp:
             raise ValueError('`--fsdp` selects the HF/Accelerate backend and cannot be combined with FSDPTurbo.')
         if self.deepspeed:
@@ -123,8 +123,8 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.streaming:
             raise ValueError('The initial FSDPTurbo backend requires a map-style dataset, not streaming data.')
         save_strategy = getattr(self.training_args.save_strategy, 'value', self.training_args.save_strategy)
-        if save_strategy != 'no':
-            raise ValueError('The initial FSDPTurbo backend requires `--save_strategy no`.')
+        if save_strategy not in ('no', 'steps'):
+            raise ValueError('FSDPTurbo supports save_strategy=no or steps.')
         if self.optimizer is not None or self.use_galore:
             raise ValueError('The initial FSDPTurbo backend supports its native AdamW optimizer only.')
         optim = getattr(self.training_args.optim, 'value', self.training_args.optim)
@@ -134,12 +134,11 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
             raise ValueError('Swift custom loss plugins are not supported by the initial FSDPTurbo backend.')
         if self.label_smoothing_factor:
             raise ValueError('FSDPTurbo label smoothing has not been validated yet.')
-        if self.router_aux_loss_coef:
-            raise ValueError('FSDPTurbo router auxiliary loss integration has not been validated yet.')
         if self.use_flash_ckpt:
             raise ValueError('DLRover flash checkpoints cannot be combined with FSDPTurbo checkpoints.')
         if self.quant_method is not None:
-            raise ValueError('The initial FSDPTurbo backend does not support Swift model quantization.')
+            raise ValueError('Do not set quant_method for FSDPTurbo; FP8/FP4 checkpoints are dequantized on rank 0 '
+                             'and trained as floating-point weights.')
         if self.experts_impl is not None:
             raise ValueError('FSDPTurbo owns the expert implementation; leave `--experts_impl` unset.')
         if self.group_by_length:
@@ -149,4 +148,4 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.attn_impl is None:
             self.attn_impl = 'eager'
         elif self.attn_impl != 'eager':
-            raise ValueError('The initial Qwen3.5 FSDPTurbo model plan requires `--attn_impl eager`.')
+            raise ValueError('The FSDPTurbo model plans require `--attn_impl eager`.')

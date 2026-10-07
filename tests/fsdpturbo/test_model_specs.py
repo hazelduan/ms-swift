@@ -88,7 +88,6 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
             'ep_modules': 1,
             'efsdp_modules': 1,
             'recompute_modules': 2,
-            'replicated_params': 2,
         }
 
         for group, count in expected_counts.items():
@@ -104,7 +103,7 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
         spec = get_model_spec(model)
 
         matches = spec.validate_model(model)
-        self.assertEqual(set(matches), {'fsdp_modules', 'fsdp_hook_modules', 'replicated_params'})
+        self.assertEqual(set(matches), {'fsdp_modules', 'fsdp_hook_modules'})
         with self.assertRaises(RuntimeError):
             spec.validate_model(model, require_tp=True)
         with self.assertRaises(RuntimeError):

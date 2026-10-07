@@ -119,7 +119,7 @@ class TestFSDPTurboArguments(unittest.TestCase):
 
     def test_unvalidated_checkpoint_and_accumulation_paths_are_rejected(self):
         cases = {
-            'resume': {'resume_from_checkpoint': '/tmp/checkpoint'},
+            'model_only_resume': {'resume_only_model': True},
             'gradient_accumulation': {'gradient_accumulation_steps': 2},
         }
         for name, overrides in cases.items():

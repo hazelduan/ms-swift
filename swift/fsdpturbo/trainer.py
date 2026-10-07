@@ -17,12 +17,9 @@ from .model_specs import FSDPTurboModelSpec, get_model_spec
 logger = get_logger()
 
 
-def _dtype_name(args) -> str:
-    if args.bf16 or args.torch_dtype == torch.bfloat16:
-        return 'bf16'
-    if args.fp16 or args.torch_dtype == torch.float16:
-        return 'fp16'
-    raise ValueError('FSDPTurbo currently requires bf16 or fp16 training.')
+def _validate_dtype(args) -> None:
+    if not (args.bf16 or args.fp16 or args.torch_dtype in (torch.bfloat16, torch.float16)):
+        raise ValueError('FSDPTurbo currently requires bf16 or fp16 training.')
 
 
 def _save_steps(train_args) -> int:
@@ -43,8 +40,9 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
                                                OptimizerConfig, TPPlanConfig, TrainRunConfig)
 
     train_args = args.training_args
-    dtype = _dtype_name(train_args)
+    _validate_dtype(train_args)
     return FSDPTurboConfig(
+        module_patches=[{'target': target, 'replacement': replacement} for target, replacement in spec.module_patches],
         model=ModelConfig(
             model_name_or_path=args.model,
             tokenizer_name_or_path=args.model,
@@ -90,7 +88,6 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
             expert_fully_shard_parallel_size=args.efsdp_size,
             fsdp_plan=FSDPPlanConfig(
                 ignored_modules=[],
-                ignored_params=list(spec.replicated_params),
                 apply_modules={pattern: {} for pattern in spec.fsdp_modules},
                 # Swift's loader already materializes ordinary weights in the
                 # requested dtype while preserving numerically sensitive
@@ -98,7 +95,9 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
                 # A global FSDP param cast would erase that mixed-dtype policy.
                 param_dtype=None,
                 reduce_dtype='fp32',
-                output_dtype=dtype,
+                # Preserve HF's fp32 CE/auxiliary loss; forcing the entire
+                # ModelOutput to bf16 quantizes scalar losses and metrics.
+                output_dtype=None,
                 num_to_forward_prefetch=args.forward_prefetch,
                 num_to_backward_prefetch=args.backward_prefetch,
                 hook_modules=list(spec.fsdp_hook_modules),
@@ -133,6 +132,8 @@ class FSDPTurboTrainer(BaseTrainer):
         self.template = template
         self.train_dataset = train_dataset
         self.spec = get_model_spec(args.model_type)
+        if args.tp_size > 1 and not (self.spec.tp_colwise_modules and self.spec.tp_rowwise_modules):
+            raise ValueError(f'FSDPTurbo TP is not implemented for {args.model_type}. Use tp_size=1.')
         self._replicated_parameters = []
         super().__init__(config=build_fsdpturbo_config(args, self.spec))
         self.processor = processor
@@ -172,30 +173,56 @@ class FSDPTurboTrainer(BaseTrainer):
         return self.processor
 
     def build_model(self):
-        logger.info('Loading the Swift model on CPU before FSDPTurbo sharding.')
-        model, processor = self.args.get_model_processor(device_map='cpu')
-        if processor is not None:
-            self.processor = processor
+        from .loading import load_rank0_model, materialize_resume_model, materialize_sharded_model
+
+        source_model, dtypes = load_rank0_model(self.args)
+        from accelerate import init_empty_weights
+        with init_empty_weights(include_buffers=False):
+            model, _ = self.args.get_model_processor(device_map='cpu', return_dummy_model=True)
+        for name, param in model.named_parameters():
+            param.data = param.data.to(dtypes[name])
         model = TunerMixin.prepare_model(self.args, model, template=self.template, train_dataset=self.train_dataset)
+        for names in self.spec.matching_modules(model, self.spec.frozen_modules).values():
+            for name in names:
+                model.get_submodule(name).requires_grad_(False)
         self.spec.validate_model(
             model,
             require_tp=self.args.tp_size > 1,
             require_ep=self.args.ep_size > 1,
             require_recompute=self.args.gradient_checkpointing,
         )
-        parameter_matches = self.spec.matching_parameters(model, self.spec.replicated_params)
-        parameter_names = {name for names in parameter_matches.values() for name in names}
-        self._replicated_parameters = [param for name, param in model.named_parameters() if name in parameter_names]
+        parameter_names = {name for name, param in model.named_parameters()
+                           if param.dtype == torch.float32 and self.args.torch_dtype != torch.float32}
+        self.config.distributed.fsdp_plan.ignored_params = sorted(parameter_names)
         if hasattr(model.config, 'use_cache'):
             model.config.use_cache = False
+        if self.args.router_aux_loss_coef:
+            text_config = getattr(model.config, 'text_config', model.config)
+            text_config.output_router_logits = True
+            text_config.router_aux_loss_coef = self.args.router_aux_loss_coef
+            if hasattr(model, 'router_aux_loss_coef'):
+                model.router_aux_loss_coef = self.args.router_aux_loss_coef
         self.template.model = model
 
         from fsdp_turbo.fsdp_turbo import FSDPTurbo
 
         logger.info('Applying the independent FSDPTurbo parallel backend.')
         model = FSDPTurbo(self.config, model)
+        if self.args.resume_from_checkpoint:
+            device = 'cpu' if self.args.offload_params else self.train_args.device
+            materialize_resume_model(model.model, device=device)
+        else:
+            materialize_sharded_model(model.model, source_model, offload=self.args.offload_params)
+        # DCP cpu_offload includes persistent buffers. FSDP only offloads
+        # parameters; routing lookup tables and rotary buffers stay on device.
+        for module in model.model.modules():
+            for name, buffer in module.named_buffers(recurse=False):
+                setattr(module, name, buffer.to(self.train_args.device))
+        self._replicated_parameters = [param for name, param in model.model.named_parameters()
+                                      if name in parameter_names]
         for param in self._replicated_parameters:
             param.data = param.data.to(self.train_args.device)
+        self.template.model = model.model
         return model
 
     def _sync_replicated_gradients(self):
@@ -204,11 +231,22 @@ class FSDPTurboTrainer(BaseTrainer):
         world_size = dist.get_world_size()
         if world_size == 1:
             return
-        for param in self._replicated_parameters:
-            if param.grad is None:
-                continue
-            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-            param.grad.div_(world_size)
+        params = [param for param in self._replicated_parameters if param.requires_grad]
+        if not params:
+            return
+        # Every rank issues the same collectives even when a compressed branch
+        # is unused for its local sequence. Globally unused parameters keep
+        # grad=None so AdamW does not decay them or create optimizer state.
+        present = torch.tensor([param.grad is not None for param in params], device=params[0].device, dtype=torch.int32)
+        gradients = torch.cat([
+            (param.grad.detach() if param.grad is not None else torch.zeros_like(param)).reshape(-1)
+            for param in params
+        ])
+        dist.all_reduce(gradients, op=dist.ReduceOp.SUM)
+        dist.all_reduce(present, op=dist.ReduceOp.SUM)
+        gradients.div_(world_size)
+        for param, gradient, active in zip(params, gradients.split([param.numel() for param in params]), present.tolist()):
+            param.grad = gradient.view_as(param) if active else None
 
     def _on_optimizer_step(self):
         self._sync_replicated_gradients()
@@ -272,6 +310,8 @@ class FSDPTurboTrainer(BaseTrainer):
             if active_scale.numel() and not torch.all(active_scale.eq(1)):
                 raise NotImplementedError('Non-uniform Swift loss scaling is not supported by FSDPTurbo yet.')
         batch['use_cache'] = False
+        if self.args.router_aux_loss_coef:
+            batch['output_router_logits'] = True
         outputs = self.model(**batch)
         if outputs.loss is None:
             raise RuntimeError('Model did not return a loss; ensure the batch contains labels.')
