@@ -4,7 +4,7 @@
 
 ## Installation and launch
 
-Install Swift's requirements and a compatible FSDPTurbo package in the active environment. Current Swift preprocessing requires the `Json` dataset feature; validation uses datasets 4.8.4. FSDPTurbo remains an optional dependency. The validated package is the local FSDPTurbo revision `4defe05` based on `435b9fdd804ef0efe413f2dcff82a9616d85c1b4`; its TP/FSDP composition fixes are required for the tested TP configurations. A stock package with the same `0.1.0` version is not sufficient evidence of compatibility. See the experiment report for the exact wheel and revision.
+Install Swift's requirements and a compatible FSDPTurbo package in the active environment. Current Swift preprocessing requires the `Json` dataset feature; validation uses datasets 4.8.4. FSDPTurbo remains an optional dependency. The latest validated package is [`beb7457`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/beb7457ccf1926eb9b18d8f037e6b81e1713331b), based on upstream `0a4b3bc`. It keeps optional quantization kernels lazy for torch_npu builds without HIFLOAT8/FP4 dtypes, exposes process-local mesh cleanup, and supports explicitly replicated precision-sensitive parameters. A stock package with the same `0.1.0` version is not sufficient evidence of compatibility. See the experiment report for the exact revision and environment.
 
 Load your CANN environment, activate your training environment, and select eight available logical NPU devices. Then run from this checkout:
 
@@ -48,6 +48,19 @@ The model-spec registry currently contains Qwen3.5 MoE only. Every required FSDP
 This initial backend requires full causal-LM SFT, a map-style dataset, positive `max_steps`, gradient accumulation of one, AdamW, eager attention and `save_strategy=no`. It writes resolved arguments and training metrics. Checkpoint save/resume, evaluation, LoRA, PP, CP and packing are not validated; unsupported switches are rejected where exposed. CPU offload is covered below; other dispatchers, multimodal batches and CUDA need separate validation.
 
 The eight-device smoke/trajectory results establish only the tested short-sequence full-SFT configurations. They do not establish long-context throughput, convergence or checkpoint correctness. See the experiment report for exact revisions, CANN version, data, loss/gradient curves and limitations.
+
+## CANN 9.0.0 upstream-refresh smoke
+
+Swift `cf4bf59ae` (including upstream `8cb686833`) and FSDPTurbo `beb7457` (including upstream `0a4b3bc`) were revalidated on 16 Ascend910_9382 logical NPUs with torch/torch_npu 2.9.0, Transformers 5.9.0, sequence length 128 and two optimizer steps:
+
+| FSDP | TP | EP | EFSDP | Loss step 1 -> 2 | Peak allocated memory reported by rank 0 |
+| ---: | ---: | ---: | ---: | --- | ---: |
+| 16 | 1 | 1 | 1 | 1.578125 -> 0.855469 | 31.47 GB |
+| 16 | 1 | 8 | 2 | 1.578125 -> 0.859375 | 35.47 GB |
+| 8 | 2 | 1 | 1 | 1.507812 -> 1.046875 | 55.06 GB |
+| 8 | 2 | 8 | 2 | 1.500000 -> 1.046875 | 36.87 GB |
+
+Qwen3.5 linear-attention `A_log` and gated-norm weights remain replicated FP32 parameters rather than being folded into a mixed-dtype FSDP group. A 16-rank probe found 60 such parameters per rank; synchronized gradients and post-step parameter sums had zero maximum cross-rank difference. These short runs prove the listed integration cells only, not long-run numerical equivalence or production throughput.
 
 ## CANN 9.1.0 capacity results
 
