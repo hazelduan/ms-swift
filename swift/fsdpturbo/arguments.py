@@ -12,6 +12,7 @@ class FSDPTurboArguments:
 
     fsdp_size: int = 1
     tp_size: int = 1
+    cp_size: int = 1
     ep_size: int = 1
     efsdp_size: int = 1
     pp_size: int = 1
@@ -26,6 +27,7 @@ class FSDPTurboArguments:
         sizes = {
             'fsdp_size': self.fsdp_size,
             'tp_size': self.tp_size,
+            'cp_size': self.cp_size,
             'ep_size': self.ep_size,
             'efsdp_size': self.efsdp_size,
             'pp_size': self.pp_size,
@@ -59,6 +61,8 @@ class FSDPTurboArguments:
         if world_size % expert_product:
             raise ValueError(
                 f'world_size ({world_size}) must be divisible by efsdp_size * ep_size ({expert_product}).')
+        if world_size % (self.cp_size * self.tp_size):
+            raise ValueError('world_size must be divisible by cp_size * tp_size.')
 
 
 @dataclass
@@ -134,6 +138,8 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
             raise ValueError('Swift custom loss plugins are not supported by the initial FSDPTurbo backend.')
         if self.label_smoothing_factor:
             raise ValueError('FSDPTurbo label smoothing has not been validated yet.')
+        if self.cp_size > 1 and self.router_aux_loss_coef:
+            raise ValueError('FSDPTurbo CP does not yet support router auxiliary loss masks.')
         if self.use_flash_ckpt:
             raise ValueError('DLRover flash checkpoints cannot be combined with FSDPTurbo checkpoints.')
         if self.quant_method is not None:

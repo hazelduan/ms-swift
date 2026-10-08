@@ -17,6 +17,8 @@ class FSDPTurboModelSpec:
     recompute_modules: Tuple[str, ...]
     module_patches: Tuple[Tuple[str, str], ...] = ()
     frozen_modules: Tuple[str, ...] = ()
+    cp_function_patches: Tuple[Tuple[str, str], ...] = ()
+    cp_module_patches: Tuple[Tuple[str, str], ...] = ()
 
     @staticmethod
     def matching_modules(model: nn.Module, patterns: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
@@ -95,6 +97,14 @@ _MODEL_SPECS = {
         ep_modules=('model.language_model.layers.{*}.mlp.experts', ),
         efsdp_modules=('model.language_model.layers.{*}.mlp.experts', ),
         recompute_modules=('model.language_model.layers.{*}', 'model.visual.blocks.{*}'),
+        cp_function_patches=(
+            ('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.eager_attention_forward', 'full_attention'),
+            ('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet.forward', 'gated_delta_net'),
+        ),
+        cp_module_patches=(
+            ('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeModel.forward',
+             'fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5_moe_model_forward'),
+        ),
     ),
 }
 

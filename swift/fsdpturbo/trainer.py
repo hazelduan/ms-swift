@@ -35,14 +35,18 @@ def _scheduler_name(train_args) -> str:
 
 
 def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
-    from fsdp_turbo.fsdp_turbo_config import (CheckpointConfig, DataConfig, DistributedConfig, EPPlanConfig,
+    from fsdp_turbo.fsdp_turbo_config import (CheckpointConfig, CPPlanConfig, DataConfig, DistributedConfig, EPPlanConfig,
                                                FSDPPlanConfig, FSDPTurboConfig, MemoryConfig, ModelConfig,
                                                OptimizerConfig, TPPlanConfig, TrainRunConfig)
 
     train_args = args.training_args
     _validate_dtype(train_args)
+    cp_size = args.cp_size
+    if cp_size > 1 and not spec.cp_function_patches:
+        raise ValueError(f'FSDPTurbo CP is not implemented for {spec.model_type}. Use cp_size=1.')
+    module_patches = spec.module_patches + (spec.cp_module_patches if cp_size > 1 else ())
     return FSDPTurboConfig(
-        module_patches=[{'target': target, 'replacement': replacement} for target, replacement in spec.module_patches],
+        module_patches=[{'target': target, 'replacement': replacement} for target, replacement in module_patches],
         model=ModelConfig(
             model_name_or_path=args.model,
             tokenizer_name_or_path=args.model,
@@ -84,6 +88,13 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
         distributed=DistributedConfig(
             fully_shard_parallel_size=args.fsdp_size,
             tensor_parallel_size=args.tp_size,
+            ulysses_parallel_size=cp_size,
+            cp_plan=CPPlanConfig(
+                ulysses_function_patches=[{'target_functions': [target], 'type': patch_type}
+                                          for target, patch_type in spec.cp_function_patches] if cp_size > 1 else [],
+                loss_function_patches=[{'target_functions': ['transformers.loss.loss_utils.ForCausalLMLoss'],
+                                        'type': 'causal_lm_loss'}] if cp_size > 1 else [],
+            ),
             expert_parallel_size=args.ep_size,
             expert_fully_shard_parallel_size=args.efsdp_size,
             fsdp_plan=FSDPPlanConfig(
