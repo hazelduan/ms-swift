@@ -124,7 +124,8 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
             ep_plan=EPPlanConfig(
                 apply_modules=list(spec.ep_modules),
                 apply_efsdp_modules=list(spec.efsdp_modules),
-                dispatcher=args.ep_dispatcher,
+                dispatcher=(spec.eager_dispatcher or args.ep_dispatcher)
+                if args.ep_dispatcher == 'eager' else args.ep_dispatcher,
             ),
         ),
         memory=MemoryConfig(
@@ -143,6 +144,13 @@ class FSDPTurboTrainer(BaseTrainer):
         self.template = template
         self.train_dataset = train_dataset
         self.spec = get_model_spec(args.model_type)
+        if self.spec.native_model_factory:
+            if args.gradient_checkpointing:
+                raise ValueError('Native V4.1 CSA2 shared runtime does not support recompute yet.')
+            if args.ep_size < 2 or args.ep_dispatcher != 'eager' or args.resume_from_checkpoint:
+                raise ValueError('Native V4.1 currently requires EP > 1, eager dispatch, and no checkpoint resume.')
+            if args.router_aux_loss_coef:
+                raise ValueError('Native V4.1 router auxiliary loss is not implemented.')
         if args.tp_size > 1 and not (self.spec.tp_colwise_modules and self.spec.tp_rowwise_modules):
             raise ValueError(f'FSDPTurbo TP is not implemented for {args.model_type}. Use tp_size=1.')
         self._replicated_parameters = []
@@ -184,12 +192,12 @@ class FSDPTurboTrainer(BaseTrainer):
         return self.processor
 
     def build_model(self):
-        from .loading import load_rank0_model, materialize_resume_model, materialize_sharded_model
+        from .loading import create_meta_model, load_rank0_model, materialize_resume_model, materialize_sharded_model
 
         source_model, dtypes = load_rank0_model(self.args)
         from accelerate import init_empty_weights
         with init_empty_weights(include_buffers=False):
-            model, _ = self.args.get_model_processor(device_map='cpu', return_dummy_model=True)
+            model = create_meta_model(self.args)
         for name, param in model.named_parameters():
             param.data = param.data.to(dtypes[name])
         model = TunerMixin.prepare_model(self.args, model, template=self.template, train_dataset=self.train_dataset)
@@ -303,13 +311,19 @@ class FSDPTurboTrainer(BaseTrainer):
 
         num_training_steps = self._resolve_max_steps()
         num_warmup_steps = self.train_args.get_warmup_steps(num_training_steps)
-        return get_scheduler(
+        factory = partial(
+            get_scheduler,
             _scheduler_name(self.train_args),
-            optimizer=self.optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=num_training_steps,
             scheduler_specific_kwargs=self.train_args.lr_scheduler_kwargs or {},
         )
+        builder = getattr(self.optimizer, 'build_scheduler', None)
+        return builder(factory) if callable(builder) else factory(optimizer=self.optimizer)
+
+    def build_optimizer(self):
+        builder = getattr(self.model.model, 'build_optimizer', None)
+        return builder(self.config.optimizer) if callable(builder) else super().build_optimizer()
 
     def train_step(self, batch):
         loss_scale = batch.pop('loss_scale', None)

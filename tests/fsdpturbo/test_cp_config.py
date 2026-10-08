@@ -58,3 +58,35 @@ def test_unimplemented_deepseek_cp_is_not_silently_enabled():
 
     with pytest.raises(ValueError, match='CP is not implemented'):
         build_fsdpturbo_config(make_args(2), get_model_spec('deepseek_v4'))
+
+
+def test_native_v41_uses_intrinsic_reference_order_dispatcher():
+    from swift.fsdpturbo.trainer import build_fsdpturbo_config
+
+    args = make_args(1)
+    args.gradient_checkpointing = False
+    spec = get_model_spec('deepseek_v41')
+    config = build_fsdpturbo_config(args, spec)
+    assert spec.native_model_factory.endswith('pretrained.build_pretrained_model')
+    assert config.distributed.ep_plan.dispatcher == 'custom_native_eager_forward'
+    assert not config.memory.recompute
+    assert not spec.tp_colwise_modules and not spec.cp_function_patches
+
+
+@pytest.mark.parametrize('field,value,message', [
+    ('gradient_checkpointing', True, 'does not support recompute'),
+    ('ep_size', 1, 'requires EP > 1'),
+    ('ep_dispatcher', 'fused', 'requires EP > 1'),
+    ('resume_from_checkpoint', '/checkpoint', 'no checkpoint resume'),
+    ('router_aux_loss_coef', 0.01, 'auxiliary loss is not implemented'),
+])
+def test_native_v41_rejects_unvalidated_modes_before_loading(field, value, message):
+    from swift.fsdpturbo.trainer import FSDPTurboTrainer
+
+    args = make_args(1)
+    args.model_type = 'deepseek_v41'
+    args.gradient_checkpointing = False
+    args.router_aux_loss_coef = 0
+    setattr(args, field, value)
+    with pytest.raises(ValueError, match=message):
+        FSDPTurboTrainer(args, None, None, None)

@@ -1,6 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple, Union
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import torch.nn as nn
 
@@ -19,6 +19,8 @@ class FSDPTurboModelSpec:
     frozen_modules: Tuple[str, ...] = ()
     cp_function_patches: Tuple[Tuple[str, str], ...] = ()
     cp_module_patches: Tuple[Tuple[str, str], ...] = ()
+    native_model_factory: Optional[str] = None
+    eager_dispatcher: Optional[str] = None
 
     @staticmethod
     def matching_modules(model: nn.Module, patterns: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
@@ -61,6 +63,21 @@ class FSDPTurboModelSpec:
 
 
 _MODEL_SPECS = {
+    'deepseek_v41':
+    FSDPTurboModelSpec(
+        model_type='deepseek_v41',
+        fsdp_modules=('model.layers.{*}', 'model.embed', 'model.head', 'model.vision.blocks.{*}',
+                      'model.vision.patch_embed', 'model.aligner'),
+        fsdp_hook_modules=('model.layers.{*}', ),
+        tp_colwise_modules=(),
+        tp_rowwise_modules=(),
+        ep_modules=('model.layers.{*}.ffn.experts', ),
+        efsdp_modules=('model.layers.{*}.ffn.experts', ),
+        recompute_modules=(),
+        frozen_modules=('model.layers.{*}.attn.indexer', ),
+        native_model_factory='fsdp_turbo.models.deepseek_v41.pretrained.build_pretrained_model',
+        eager_dispatcher='custom_native_eager_forward',
+    ),
     'deepseek_v4':
     FSDPTurboModelSpec(
         model_type='deepseek_v4',
