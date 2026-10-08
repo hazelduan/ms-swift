@@ -6,7 +6,7 @@ For DeepSeek V4 Flash and Qwen3.5-122B multi-node deployment, use the [multi-nod
 
 ## Installation and launch
 
-Install Swift's requirements and a compatible FSDPTurbo package in the active environment. Current Swift preprocessing requires the `Json` dataset feature; validation uses datasets 4.8.4. FSDPTurbo remains an optional dependency. The latest validated package is [`ee117ad`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/ee117ade23ab9b479df1b40b86780d8a8a64a251), on branch `swift-fsdpturbo-compat`, based on upstream `0a4b3bc`. Besides lazy optional quantization imports and replicated precision-sensitive parameters, it supplies the DeepSeek V4 bridge, mixed-device gradient clipping and same-layout DCP resume fixes. A stock package with the same `0.1.0` version is not sufficient evidence of compatibility.
+Install Swift's requirements and a compatible FSDPTurbo package in the active environment. Current Swift preprocessing requires the `Json` dataset feature; validation uses datasets 4.8.4. FSDPTurbo remains an optional dependency. The earlier HF baseline is [`ee117ad`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/ee117ade23ab9b479df1b40b86780d8a8a64a251), on branch `swift-fsdpturbo-compat`, based on upstream `0a4b3bc`. The later CP/native-V4.1 validation requires backend `cb1c8ecc09ffc4f7130cda584d49fce2933147b8` or a descendant, including upstream `65a0880`. It retains the DeepSeek V4 bridge and checkpoint fixes, adds local-head GQA/CP compatibility, and supplies strict native V4.1/Host Engram loading. Verify that the exact revision is present in your existing checkout; the package's `0.1.0` version alone does not establish compatibility.
 
 Load your CANN environment, activate your training environment, and select eight available logical NPU devices. Then run from this checkout:
 
@@ -31,7 +31,7 @@ The outer CLI forwards to a secondary router which starts exactly one torchrun l
 
 ## Topology
 
-`WORLD_SIZE` must be divisible by both `fsdp_size * tp_size` and `ep_size * efsdp_size`. These are overlapping meshes; do not multiply all four sizes to calculate world size. `efsdp_size > 1` requires `ep_size > 1`.
+`WORLD_SIZE` must be divisible by `fsdp_size * tp_size`, `ep_size * efsdp_size` and `cp_size * tp_size`. These are overlapping meshes; do not multiply all sizes to calculate world size. `efsdp_size > 1` requires `ep_size > 1`. `cp_size` defaults to one; Qwen3.5 uses the backend's Ulysses full-attention, GatedDeltaNet and causal-loss interfaces.
 
 Eight-device topology configurations (see the capacity results below):
 
@@ -45,15 +45,37 @@ Eight-device topology configurations (see the capacity results below):
 
 ## Current scope
 
-The model-spec registry contains Qwen3.5 MoE and DeepSeek V4. Every required FSDP, TP, expert and recompute module pattern is checked against the actual model. EP/EFSDP applies to expert containers, not embeddings, attention or the language-model head. DeepSeek V4 uses instance-level RMSNorm and HyperConnection/Sinkhorn replacements; native masked attention is retained. Its nondifferentiable top-k indexer stays frozen for SFT.
+The model-spec registry contains Qwen3.5 MoE, DeepSeek V4 and the backend-native DeepSeek V4.1 adapter. Every required FSDP, TP, expert and recompute module pattern is checked against the actual model. EP/EFSDP applies to expert containers, not embeddings, attention or the language-model head. DeepSeek V4 uses instance-level RMSNorm and HyperConnection/Sinkhorn replacements; native masked attention is retained. Its nondifferentiable top-k indexer stays frozen for SFT.
 
-This backend requires full causal-LM SFT, a map-style dataset, positive `max_steps`, gradient accumulation of one, AdamW and eager attention. It supports `save_strategy=no` or `steps`; DCP resume restores model, optimizer, scheduler, rank-local data cursor and per-rank RNG with the same parallel layout. It writes resolved arguments and training metrics. Evaluation, LoRA, PP, CP and packing are not validated; unsupported switches are rejected where exposed. CPU offload is covered below; other dispatchers, multimodal batches and CUDA need separate validation.
+This backend requires full causal-LM SFT, a map-style dataset, positive `max_steps`, gradient accumulation of one, AdamW and eager attention. It supports `save_strategy=no` or `steps`; DCP resume for the HF model paths restores model, optimizer, scheduler, rank-local data cursor and per-rank RNG with the same parallel layout. It writes resolved arguments and training metrics. Evaluation, LoRA, PP and packing are not validated; unsupported switches are rejected where exposed. Qwen CP is validated below, but DeepSeek V4/V4.1 TP/CP remain unavailable. CPU offload is covered below; other dispatchers, multimodal batches and CUDA need separate validation.
+
+DeepSeek V4.1 uses a native model factory in the existing model-spec registry, not the metadata-only HF V4 dummy. The backend reads the composite source configuration, decodes Ascend W8A8 dense/packed-expert tensors and installs complete owner-local Engram rows after EP sharding. Engram's CPU BF16 weights and FP32 active-row Adam state are managed by the model-owned optimizer; sparse gradients use the same mean convention as dense FSDP. For a QuaRot export, only the Engram gate input is restored to the original basis; the already-rotated value is not rotated twice. This route currently requires BF16, EP > 1, eager dispatch, no activation recompute, no router auxiliary loss and no checkpoint resume. Official HF FP8/FP4 V4.1 loading and Swift multimodal inputs remain unvalidated. Use `--gradient_checkpointing false --vit_gradient_checkpointing false` for V4.1.
 
 Only global rank 0 loads and converts pretrained CPU weights. All ranks construct on meta and apply the backend's sharding first; PyTorch DCP broadcasts one tensor at a time into local shards. FP8/FP4 checkpoint weights are dequantized to the requested training dtype while FP32 stability parameters are preserved. On resume, only tensor metadata is read before local-shard allocation; original pretrained weights are not loaded again.
 
 The results establish only the tested short-sequence full-SFT configurations. They do not establish long-context throughput or convergence. The earlier eight-device experiments did not test checkpoint resume; the latest tests below do.
 
 ## Large-model startup validation (2026-10-08)
+
+### Later true-pretrained CANN 9.1.0 validation
+
+Existing Python 3.11.15 / torch 2.9.0+cpu / torch_npu 2.9.0 / Transformers 5.9.0 were retained. Actual loaded runtime, HCCL and ACL libraries were checked on every rank. No model download or random replacement was used. Original widths and expert counts were preserved; only decoder depth was reduced.
+
+| Source model / reduced decoder | FSDP / TP / CP / EP / EFSDP | Optimizer steps / exit | Maximum allocated NPU peak |
+| --- | --- | --- | ---: |
+| DeepSeek V4 Flash, original 0–4 / 33.984B |8 /1 /1 /8 /1 |100 /0 |51.669 GiB |
+| Qwen3.5-122B-A10B, original 0–3 / 12.026B |8 /1 /1 /8 /1 |100 /0 |21.942 GiB |
+| V4.1 Flash Ascend W8A8, original 0–3 / 155.301B including intact Engram1 |16 /1 /1 /16 /1 |100 /0 |39.756 GiB |
+
+V4 keeps SL/hash, CSA/hash, HCA/MoE and CSA/MoE layers. Qwen keeps three GDN and one full-attention layer. V4.1 keeps SL0/1, Engram1, CSA2 source2 and reuse3; its prefix does not cover original candidate source20, Engram14, vision execution or DSpark. V4.1 proves finite forward/backward and real dense/sparse updates, not full-depth capacity or accuracy of the original Aurora export.
+
+Qwen's FSDP-only, TP2-only, CP2-only and TP2+CP2+EP8/EF2 configurations completed a matched 20-step control on 16 NPUs/global batch 16. The controlled dataset has equal shifted-label counts; canonical global input/label hashes matched on every step. Maximum loss/gradient relative errors against FSDP were 0.2082%/0.9912%, 0.1779%/0.7480% and 0.1966%/0.8436%, respectively; all correlations exceeded 0.99999 and all points passed the predeclared 5%/10% limits. Earlier variable-answer-length comparisons are not equivalent controls: changing local grouping changes the mean-loss weighting. Their failed precision gates were retained rather than relabeled as passing.
+
+A separate V4.1 view using original layers 0/1/20/21 passed a three-step EP16 smoke, with source tensor aliases checked strictly. Candidate generation and CSA1 source/reuse were observed. Sequence length 256 does not exercise pruning beyond 2,048 blocks × 8 tokens; that threshold, Engram14 and vision batches remain untested.
+
+These are short-sequence text/full-SFT integration results, not model-quality or production-throughput claims. The two8-NPU100-step jobs ran concurrently on disjoint devices; do not compare their speeds as a controlled benchmark. Exact source snapshots, resolved arguments, source provenance, failed logs, per-rank memory/library evidence and `summary.json` are retained under `/home/dxq/experiments/swift_fsdpturbo_real100_20261008`.
+
+### Earlier startup/fixture evidence
 
 Tested code pair: Swift `0400d8c2d5c5c68cea4c6e166dcf5892781d47c5` (including upstream `0bd7b0aa1`) and FSDPTurbo `ee117ade23ab9b479df1b40b86780d8a8a64a251` (including upstream `0a4b3bc`). Later documentation-only commits do not change this code pair. Environment: Python 3.11.15, CANN 9.0.0, driver 26.0.rc1, torch 2.9.0+cpu, torch_npu 2.9.0, Transformers 5.9.0 and Accelerate 1.13.0.
 
