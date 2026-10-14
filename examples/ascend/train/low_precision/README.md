@@ -1,0 +1,74 @@
+<!-- Copyright (c) ModelScope Contributors. All rights reserved. -->
+
+# DeepSpeed low-precision configuration on Ascend
+
+[`zero2_autoep_hifloat8.json`](zero2_autoep_hifloat8.json) uses DeepSpeed's optional
+accelerator-owned TorchAO HiFloat8 provider with BF16 parameters and communication,
+ZeRO-2, and single-node AutoEP with four ranks. Swift reads this file through its
+ordinary `--deepspeed` argument and passes the configuration to DeepSpeed. DeepSpeed
+owns provider initialization and optimizer creation; no Swift backend plugin or
+kernel patch is needed.
+
+From the repository root, add this argument to an appropriately configured training
+command:
+
+```text
+--deepspeed examples/ascend/train/low_precision/zero2_autoep_hifloat8.json
+```
+
+This is a configuration example, not a complete launch script. The JSON's `auto`
+values are filled by Transformers/Accelerate from the training arguments. Use BF16
+training arguments consistent with the file, including `--torch_dtype bfloat16`.
+
+## Dependencies and configuration
+
+Install matching, pinned revisions of DeepSpeed with the low-precision provider
+extension and the optional Ascend `torchao_npu` package that exposes
+`torchao.hifloat8`. An upstream DeepSpeed release without that extension is not
+sufficient. Prepare the paired PyTorch/TorchNPU versions, TorchAO, CANN/driver,
+device permissions, and this machine's four-rank HCCL configuration separately.
+No explicit `import torchao_npu` or manual backend activation is required.
+
+The source partial-training validation used Ascend950PR, CANN 9.1.0, driver
+25.7.rc1, Python 3.11.15, PyTorch/TorchNPU 2.11.0, TorchAO 0.18.0,
+Transformers 5.16.1, Accelerate 1.14.0, and Swift 4.6.0.dev0. Changing the stack
+requires validation on the target machine.
+
+`low_precision.backend="torchao"` and `format="hifloat8"` select the NPU provider.
+Its numerical configuration is optional: omitting `config`, as here, uses TorchAO's
+validated BF16-input defaults (input/weight/gradient scale denominators 15/15/224). The
+converted modules retain their input/output dtype at the module boundary even when
+the working GEMM uses FP16. `expected_module_count` can be supplied as an additional
+selection check once the converted module count has been established for the model.
+DeepSpeed still accepts the legacy `hifloat8` section through a compatibility
+adapter; do not provide both sections in one file.
+
+For a BF16 comparison, remove the `low_precision` section and retain the same
+AutoEP, ZeRO, communication, and training settings. The native BF16 grouped path
+uses PyTorch/TorchNPU and does not require the optional TorchAO HiFloat8 package.
+
+## Validation scope and parameter selection
+
+The configuration is derived from a Qwen3.5-35B-A3B text-only partial-training run:
+all 40 layers executed, while only the routed and shared experts in layers 0 and
+39 were trainable (12 tensors per rank after EP4). The run used BF16 model weights,
+batch size 1 per rank, gradient accumulation 1, sequence length 256, eager attention,
+`--experts_impl eager`, `--enable_npu_model_patch false`, no activation checkpointing,
+seed 42, and AdamW at `1e-5` with a cosine schedule.
+
+The module patterns choose where low-precision computation runs; they do **not**
+choose trainable parameters. To reproduce that scope, freeze all parameters and
+explicitly unfreeze only the layer 0/39 expert parameters through Swift's
+`freeze_parameters_regex` and `trainable_parameters_regex` arguments with
+`--tuner_type full`. That tuner setting still requires the explicit freeze/unfreeze
+selection to reproduce partial training. Confirm the actual parameter names and
+trainable count for the loaded model before launching.
+Set up the full BF16 model, dataset, four authorized NPUs, and local communication
+configuration outside this example.
+
+The provider training contract is BF16 with ZeRO stages 0–2; this model evidence
+covers EP4/ZeRO-2 only. Full-parameter SFT, LoRA, activation checkpointing, offload,
+compile, EP8, multi-node training, and AutoEP checkpoint/resume remain untested.
+ZeRO-3, pipeline/AutoTP/custom-MPU combinations, and quantized checkpoint ingestion
+are unsupported by this integration. The original partial-training run disabled
+checkpoint saving; it does not establish model checkpoint recovery.
