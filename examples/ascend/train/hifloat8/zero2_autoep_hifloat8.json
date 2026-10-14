@@ -24,10 +24,14 @@
     "preset_model": "qwen3_5_moe",
     "comm_backend": "comm"
   },
-  "low_precision": {
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "steps_per_print": 1000,
+  "hifloat8": {
     "enabled": true,
     "backend": "torchao",
-    "format": "hifloat8",
     "module_name_patterns": [
       "*.experts",
       "*.shared_experts.gate_proj",
@@ -35,10 +39,5 @@
       "*.shared_experts.down_proj"
     ],
     "min_numel": 65536
-  },
-  "gradient_accumulation_steps": "auto",
-  "gradient_clipping": "auto",
-  "train_batch_size": "auto",
-  "train_micro_batch_size_per_gpu": "auto",
-  "steps_per_print": 1000
+  }
 }

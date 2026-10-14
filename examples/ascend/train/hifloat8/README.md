@@ -1,19 +1,19 @@
 <!-- Copyright (c) ModelScope Contributors. All rights reserved. -->
 
-# DeepSpeed low-precision configuration on Ascend
+# DeepSpeed HiFloat8 configuration on Ascend
 
 [`zero2_autoep_hifloat8.json`](zero2_autoep_hifloat8.json) uses DeepSpeed's optional
-accelerator-owned TorchAO HiFloat8 provider with BF16 parameters and communication,
+accelerator-selected TorchAO HiFloat8 APIs with BF16 parameters and communication,
 ZeRO-2, and single-node AutoEP with four ranks. Swift reads this file through its
 ordinary `--deepspeed` argument and passes the configuration to DeepSpeed. DeepSpeed
-owns provider initialization and optimizer creation; no Swift backend plugin or
+owns capability checks, the public quantize_ conversion and optimizer creation; no Swift backend plugin or
 kernel patch is needed.
 
 From the repository root, add this argument to an appropriately configured training
 command:
 
 ```text
---deepspeed examples/ascend/train/low_precision/zero2_autoep_hifloat8.json
+--deepspeed examples/ascend/train/hifloat8/zero2_autoep_hifloat8.json
 ```
 
 This is a configuration example, not a complete launch script. The JSON's `auto`
@@ -34,16 +34,17 @@ The source partial-training validation used Ascend950PR, CANN 9.1.0, driver
 Transformers 5.16.1, Accelerate 1.14.0, and Swift 4.6.0.dev0. Changing the stack
 requires validation on the target machine.
 
-`low_precision.backend="torchao"` and `format="hifloat8"` select the NPU provider.
+`hifloat8.backend="torchao"` selects the accelerator's optional HiFloat8 APIs.
+Linear and GroupedExperts are configured together by TorchAO `quantize_`.
 Its numerical configuration is optional: omitting `config`, as here, uses TorchAO's
 validated BF16-input defaults (input/weight/gradient scale denominators 15/15/224). The
 converted modules retain their input/output dtype at the module boundary even when
 the working GEMM uses FP16. `expected_module_count` can be supplied as an additional
 selection check once the converted module count has been established for the model.
-DeepSpeed still accepts the legacy `hifloat8` section through a compatibility
-adapter; do not provide both sections in one file.
+The existing `hifloat8` section is retained; its old backend name `torchao_npu`
+is normalized to `torchao`. The temporary `low_precision` section is rejected.
 
-For a BF16 comparison, remove the `low_precision` section and retain the same
+For a BF16 comparison, remove the `hifloat8` section and retain the same
 AutoEP, ZeRO, communication, and training settings. The native BF16 grouped path
 uses PyTorch/TorchNPU and does not require the optional TorchAO HiFloat8 package.
 
@@ -72,3 +73,8 @@ compile, EP8, multi-node training, and AutoEP checkpoint/resume remain untested.
 ZeRO-3, pipeline/AutoTP/custom-MPU combinations, and quantized checkpoint ingestion
 are unsupported by this integration. The original partial-training run disabled
 checkpoint saving; it does not establish model checkpoint recovery.
+
+Qwen3.5 wrapper compatibility is maintained in a separate DeepSpeed change.
+Using the conditional-generation wrapper for text input requires that change;
+the base HiFloat8 integration does not itself add wrapper support. NPU permutation
+optimization is also independent of this configuration.
