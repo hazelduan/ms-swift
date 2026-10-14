@@ -74,7 +74,6 @@ ZeRO-3, pipeline/AutoTP/custom-MPU combinations, and quantized checkpoint ingest
 are unsupported by this integration. The original partial-training run disabled
 checkpoint saving; it does not establish model checkpoint recovery.
 
-Qwen3.5 wrapper compatibility is maintained in a separate DeepSpeed change.
-Using the conditional-generation wrapper for text input requires that change;
-the base HiFloat8 integration does not itself add wrapper support. NPU permutation
-optimization is also independent of this configuration.
+The paired DeepSpeed integration includes Qwen3.5 text-wrapper compatibility
+and NPU permutation index generation through the existing AutoEP extension points.
+Neither requires additional fields in this configuration; vision input remains untested.
