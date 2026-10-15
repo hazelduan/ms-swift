@@ -6,8 +6,8 @@
 accelerator-selected TorchAO HiFloat8 APIs with BF16 parameters and communication,
 ZeRO-2, and single-node AutoEP with four ranks. Swift reads this file through its
 ordinary `--deepspeed` argument and passes the configuration to DeepSpeed. DeepSpeed
-owns capability checks, the public quantize_ conversion and optimizer creation; no Swift backend plugin or
-kernel patch is needed.
+owns capability checks, the public `quantize_` conversion and optimizer creation;
+no Swift backend plugin or kernel patch is needed.
 
 From the repository root, add this argument to an appropriately configured training
 command:
@@ -22,12 +22,15 @@ training arguments consistent with the file, including `--torch_dtype bfloat16`.
 
 ## Dependencies and configuration
 
-Install matching, pinned revisions of DeepSpeed with the low-precision provider
-extension and the optional Ascend `torchao_npu` package that exposes
+Install matching, pinned revisions of the public TorchAO integration in
+[DeepSpeed PR #8784](https://github.com/deepspeedai/DeepSpeed/pull/8784),
+`torchao>=0.18,<0.19`, and the optional Ascend `torchao_npu` package that exposes
 `torchao.hifloat8`. An upstream DeepSpeed release without that extension is not
 sufficient. Prepare the paired PyTorch/TorchNPU versions, TorchAO, CANN/driver,
 device permissions, and this machine's four-rank HCCL configuration separately.
-No explicit `import torchao_npu` or manual backend activation is required.
+Keep the extension's automatic activation enabled. No explicit `import torchao_npu`
+or manual model conversion is required. Upstream TorchAO alone does not supply
+the HiFloat8 implementation.
 
 The source partial-training validation used Ascend950PR, CANN 9.1.0, driver
 25.7.rc1, Python 3.11.15, PyTorch/TorchNPU 2.11.0, TorchAO 0.18.0,
@@ -36,6 +39,10 @@ requires validation on the target machine.
 
 `hifloat8.backend="torchao"` selects the accelerator's optional HiFloat8 APIs.
 Linear and GroupedExperts are configured together by TorchAO `quantize_`.
+DeepSpeed's normal initialization applies it after AutoEP replacement and device
+placement, before optimizer setup. One `ModuleFqnToConfig` map uses AO's
+`HiFloat8Config` for Linear and a small DeepSpeed handler to bind the same policy
+and grouped GEMM to GroupedExperts. There is no provider conversion wrapper.
 Its numerical configuration is optional: omitting `config`, as here, uses TorchAO's
 validated BF16-input defaults (input/weight/gradient scale denominators 15/15/224). The
 converted modules retain their input/output dtype at the module boundary even when
@@ -67,7 +74,7 @@ trainable count for the loaded model before launching.
 Set up the full BF16 model, dataset, four authorized NPUs, and local communication
 configuration outside this example.
 
-The provider training contract is BF16 with ZeRO stages 0–2; this model evidence
+The HiFloat8 training contract is BF16 with ZeRO stages 0–2; this model evidence
 covers EP4/ZeRO-2 only. Full-parameter SFT, LoRA, activation checkpointing, offload,
 compile, EP8, multi-node training, and AutoEP checkpoint/resume remain untested.
 ZeRO-3, pipeline/AutoTP/custom-MPU combinations, and quantized checkpoint ingestion
