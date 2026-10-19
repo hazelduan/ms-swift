@@ -41,10 +41,10 @@ requires validation on the target machine.
 Linear and GroupedExperts are configured together by TorchAO `quantize_`.
 DeepSpeed's normal initialization applies it after AutoEP replacement and device
 placement, before optimizer setup. One `ModuleFqnToConfig` map uses AO's
-`HiFloat8Config` for Linear and a policy-only `GroupedExpertsConfig` for experts.
-The grouped handler resolves the accelerator's HiFloat8 GEMM and binds that
-policy; the engine does not select or pass a grouped function. There is no
-provider conversion wrapper.
+`HiFloat8Config` for Linear and AO's `HiFloat8GroupedConfig` for experts. Both use
+the same numerical settings and common policy base. AO registers both handlers and binds its grouped GEMM through
+the expert container's existing `grouped_mm` slot. DeepSpeed defines no grouped
+handler and does not select a GEMM callable. There is no provider conversion wrapper.
 Its numerical configuration is optional: omitting `config`, as here, uses TorchAO's
 validated BF16-input defaults (input/weight/gradient scale denominators 15/15/224). The
 converted modules retain their input/output dtype at the module boundary even when
