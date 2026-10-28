@@ -1,15 +1,13 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from typing import List, Optional, Union
-
 import torch
 import torch.distributed as dist
+from typing import List, Optional, Union
 
 from swift.pipelines import SwiftPipeline
 from swift.pipelines.train.sft import SwiftSft
 from swift.utils import append_to_jsonl, get_logger, is_master
 from .arguments import FSDPTurboSftArguments
 from .trainer import FSDPTurboTrainer
-
 
 logger = get_logger()
 

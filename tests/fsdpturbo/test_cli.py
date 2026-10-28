@@ -21,18 +21,17 @@ class TestFSDPTurboCli(unittest.TestCase):
     def test_primary_route_defers_torchrun_to_fsdpturbo_router(self):
         self.assertEqual(cli_main_module.ROUTE_MAPPING['fsdpturbo'], 'swift.cli.fsdpturbo')
         with mock.patch.dict(os.environ, {'NPROC_PER_NODE': '2'}, clear=True):
-            command = self._run_shared_router(
-                ['swift', 'fsdpturbo', 'sft', '--model', 'tiny'], cli_main_module.ROUTE_MAPPING)
+            command = self._run_shared_router(['swift', 'fsdpturbo', 'sft', '--model', 'tiny'],
+                                              cli_main_module.ROUTE_MAPPING)
 
         self.assertNotIn('torch.distributed.run', command)
         self.assertEqual(command[1:], ['/virtual/target.py', 'sft', '--model', 'tiny'])
 
     def test_secondary_route_launches_torchrun_exactly_once(self):
         with mock.patch.dict(os.environ, {'NPROC_PER_NODE': '2'}, clear=True):
-            command = self._run_shared_router(
-                ['fsdpturbo', 'sft', '--model', 'tiny'],
-                {'sft': 'swift.cli._fsdpturbo.sft'},
-                torchrun_all_methods=True)
+            command = self._run_shared_router(['fsdpturbo', 'sft', '--model', 'tiny'],
+                                              {'sft': 'swift.cli._fsdpturbo.sft'},
+                                              torchrun_all_methods=True)
 
         self.assertEqual(command.count('torch.distributed.run'), 1)
         self.assertEqual(command[-3:], ['/virtual/target.py', '--model', 'tiny'])
@@ -62,8 +61,8 @@ class TestFSDPTurboCli(unittest.TestCase):
         from swift.cli._fsdpturbo.sft import ensure_npu_model_patch_disabled
 
         for argv in [
-                ['sft.py', '--enable_npu_model_patch', 'true'],
-                ['sft.py', '--enable-npu-model-patch=1'],
+            ['sft.py', '--enable_npu_model_patch', 'true'],
+            ['sft.py', '--enable-npu-model-patch=1'],
         ]:
             with self.subTest(argv=argv), self.assertRaises(ValueError):
                 ensure_npu_model_patch_disabled(argv)

@@ -1,7 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import sys
 
-
 _MODEL_PATCH_FLAGS = ('--enable_npu_model_patch', '--enable-npu-model-patch')
 _FALSE_VALUES = {'0', 'false', 'f', 'no', 'n', 'off'}
 

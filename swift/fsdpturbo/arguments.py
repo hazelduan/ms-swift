@@ -12,6 +12,7 @@ class FSDPTurboArguments:
 
     fsdp_size: int = 1
     tp_size: int = 1
+    cp_size: int = 1
     ep_size: int = 1
     efsdp_size: int = 1
     pp_size: int = 1
@@ -26,6 +27,7 @@ class FSDPTurboArguments:
         sizes = {
             'fsdp_size': self.fsdp_size,
             'tp_size': self.tp_size,
+            'cp_size': self.cp_size,
             'ep_size': self.ep_size,
             'efsdp_size': self.efsdp_size,
             'pp_size': self.pp_size,
@@ -34,11 +36,12 @@ class FSDPTurboArguments:
             if size < 1:
                 raise ValueError(f'{name} must be positive, got {size}.')
         if self.pp_size != 1:
-            raise ValueError(
-                'FSDPTurbo main does not implement pipeline parallelism; pp_size must remain 1. '
-                'Adding PP outside the backend would build FSDP/EP meshes across pipeline stages.')
+            raise ValueError('FSDPTurbo main does not implement pipeline parallelism; pp_size must remain 1. '
+                             'Adding PP outside the backend would build FSDP/EP meshes across pipeline stages.')
         if self.efsdp_size > 1 and self.ep_size == 1:
             raise ValueError('efsdp_size > 1 requires ep_size > 1 in FSDPTurbo.')
+        if self.tp_size > 1 and self.fsdp_implementation != 'native':
+            raise ValueError('FSDPTurbo TP requires the native composable FSDP implementation.')
         if self.forward_prefetch < 0 or self.backward_prefetch < 0:
             raise ValueError('FSDPTurbo prefetch counts must be non-negative.')
 
@@ -52,17 +55,43 @@ class FSDPTurboArguments:
         dense_product = self.fsdp_size * self.tp_size
         expert_product = self.efsdp_size * self.ep_size
         if world_size % dense_product:
-            raise ValueError(
-                f'world_size ({world_size}) must be divisible by fsdp_size * tp_size ({dense_product}).')
+            raise ValueError(f'world_size ({world_size}) must be divisible by fsdp_size * tp_size ({dense_product}).')
         if world_size % expert_product:
-            raise ValueError(
-                f'world_size ({world_size}) must be divisible by efsdp_size * ep_size ({expert_product}).')
+            raise ValueError(f'world_size ({world_size}) must be divisible by efsdp_size * ep_size ({expert_product}).')
+        if world_size % (self.cp_size * self.tp_size):
+            raise ValueError('world_size must be divisible by cp_size * tp_size.')
 
 
 @dataclass
 class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
     tuner_type: Literal['full'] = 'full'
     add_version: bool = False
+
+    def _init_device(self):
+        super()._init_device()
+        from swift.utils import init_process_group, is_dist
+
+        if not self.offload_params or not is_dist():
+            return
+        import torch
+        import torch.distributed as dist
+
+        device = torch.accelerator.current_accelerator()
+        if device is None or device.type == 'cpu':
+            return
+        accelerator_backend = dist.get_default_backend_for_device(device)
+        if self.ddp_backend not in (None, accelerator_backend):
+            raise ValueError('FSDPTurbo CPU offload requires ddp_backend to be unset or use '
+                             f'the accelerator backend ({accelerator_backend}).')
+        if dist.is_initialized():
+            backends = dict(item.split(':') for item in dist.get_backend_config().split(','))
+            if 'cpu' not in backends or device.type not in backends:
+                raise ValueError('FSDPTurbo CPU offload requires a process group with both CPU and accelerator '
+                                 'backends; initialize that process group before constructing training arguments.')
+            return
+        # Accelerate otherwise initializes an accelerator-only group. Mesh
+        # subgroups must also reduce CPU gradient norms after FSDP offload.
+        init_process_group(backend=f'cpu:gloo,{device.type}:{accelerator_backend}', timeout=self.ddp_timeout)
 
     def __post_init__(self) -> None:
         self.validate_fsdpturbo()
@@ -71,9 +100,9 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.add_version:
             raise ValueError('FSDPTurbo requires a shared explicit output_dir; `--add_version` must be false.')
         if self.resume_only_model:
-            raise ValueError('The initial FSDPTurbo backend does not support checkpoint resume yet.')
-        if self.resume_from_checkpoint:
-            raise ValueError('The initial FSDPTurbo backend does not support checkpoint resume yet.')
+            raise ValueError('FSDPTurbo resumes model and optimizer state; resume_only_model is not supported.')
+        if self.resume_from_checkpoint and self.ignore_data_skip:
+            raise ValueError('FSDPTurbo resume restores the data cursor; ignore_data_skip is not supported.')
         if self.fsdp:
             raise ValueError('`--fsdp` selects the HF/Accelerate backend and cannot be combined with FSDPTurbo.')
         if self.deepspeed:
@@ -95,8 +124,8 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.streaming:
             raise ValueError('The initial FSDPTurbo backend requires a map-style dataset, not streaming data.')
         save_strategy = getattr(self.training_args.save_strategy, 'value', self.training_args.save_strategy)
-        if save_strategy != 'no':
-            raise ValueError('The initial FSDPTurbo backend requires `--save_strategy no`.')
+        if save_strategy not in ('no', 'steps'):
+            raise ValueError('FSDPTurbo supports save_strategy=no or steps.')
         if self.optimizer is not None or self.use_galore:
             raise ValueError('The initial FSDPTurbo backend supports its native AdamW optimizer only.')
         optim = getattr(self.training_args.optim, 'value', self.training_args.optim)
@@ -106,12 +135,13 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
             raise ValueError('Swift custom loss plugins are not supported by the initial FSDPTurbo backend.')
         if self.label_smoothing_factor:
             raise ValueError('FSDPTurbo label smoothing has not been validated yet.')
-        if self.router_aux_loss_coef:
-            raise ValueError('FSDPTurbo router auxiliary loss integration has not been validated yet.')
+        if self.cp_size > 1 and self.router_aux_loss_coef:
+            raise ValueError('FSDPTurbo CP does not yet support router auxiliary loss masks.')
         if self.use_flash_ckpt:
             raise ValueError('DLRover flash checkpoints cannot be combined with FSDPTurbo checkpoints.')
         if self.quant_method is not None:
-            raise ValueError('The initial FSDPTurbo backend does not support Swift model quantization.')
+            raise ValueError('Do not set quant_method for FSDPTurbo; FP8/FP4 checkpoints are dequantized on rank 0 '
+                             'and trained as floating-point weights.')
         if self.experts_impl is not None:
             raise ValueError('FSDPTurbo owns the expert implementation; leave `--experts_impl` unset.')
         if self.group_by_length:
@@ -121,4 +151,4 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.attn_impl is None:
             self.attn_impl = 'eager'
         elif self.attn_impl != 'eager':
-            raise ValueError('The initial Qwen3.5 FSDPTurbo model plan requires `--attn_impl eager`.')
+            raise ValueError('The FSDPTurbo model plans require `--attn_impl eager`.')

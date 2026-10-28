@@ -3,7 +3,6 @@ from typing import Dict
 
 from swift.cli.main import cli_main as swift_cli_main
 
-
 ROUTE_MAPPING: Dict[str, str] = {
     'sft': 'swift.cli._fsdpturbo.sft',
 }

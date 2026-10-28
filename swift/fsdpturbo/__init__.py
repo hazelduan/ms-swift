@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING
 
 from swift.utils.import_utils import _LazyModule
 
-
 if TYPE_CHECKING:
     from .arguments import FSDPTurboArguments, FSDPTurboSftArguments
     from .model_specs import FSDPTurboModelSpec, get_model_spec

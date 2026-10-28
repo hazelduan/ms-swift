@@ -44,7 +44,7 @@ class TestFSDPTurboArguments(unittest.TestCase):
         self.assertIsNone(args.validate_fsdpturbo(world_size=8))
 
     def test_parallel_sizes_must_be_positive(self):
-        for field in ('fsdp_size', 'tp_size', 'ep_size', 'efsdp_size', 'pp_size'):
+        for field in ('fsdp_size', 'tp_size', 'cp_size', 'ep_size', 'efsdp_size', 'pp_size'):
             for value in (0, -1):
                 with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                     args = FSDPTurboArguments(**{field: value})
@@ -54,6 +54,7 @@ class TestFSDPTurboArguments(unittest.TestCase):
         cases = {
             'pipeline_parallelism': dict(pp_size=2),
             'efsdp_without_ep': dict(efsdp_size=2, ep_size=1),
+            'tp_with_custom_fsdp': dict(tp_size=2, fsdp_implementation='custom'),
         }
         for name, kwargs in cases.items():
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -64,6 +65,7 @@ class TestFSDPTurboArguments(unittest.TestCase):
             'fsdp_times_tp': dict(fsdp_size=2, tp_size=2, world_size=6),
             'efsdp_times_ep': dict(ep_size=2, efsdp_size=2, world_size=6),
             'product_larger_than_world': dict(fsdp_size=4, tp_size=2, world_size=4),
+            'cp_times_tp': dict(cp_size=3, tp_size=2, world_size=8),
         }
         for name, values in cases.items():
             world_size = values.pop('world_size')
@@ -90,8 +92,12 @@ class TestFSDPTurboArguments(unittest.TestCase):
 
     def test_hf_distributed_backends_are_rejected_before_sft_init(self):
         cases = {
-            'fsdp': {'fsdp': 'full_shard'},
-            'deepspeed': {'deepspeed': 'zero2'},
+            'fsdp': {
+                'fsdp': 'full_shard'
+            },
+            'deepspeed': {
+                'deepspeed': 'zero2'
+            },
         }
         for name, overrides in cases.items():
             args = self._bare_sft_args(**overrides)
@@ -118,8 +124,12 @@ class TestFSDPTurboArguments(unittest.TestCase):
 
     def test_unvalidated_checkpoint_and_accumulation_paths_are_rejected(self):
         cases = {
-            'resume': {'resume_from_checkpoint': '/tmp/checkpoint'},
-            'gradient_accumulation': {'gradient_accumulation_steps': 2},
+            'model_only_resume': {
+                'resume_only_model': True
+            },
+            'gradient_accumulation': {
+                'gradient_accumulation_steps': 2
+            },
         }
         for name, overrides in cases.items():
             args = self._bare_sft_args(**overrides)

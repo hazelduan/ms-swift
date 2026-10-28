@@ -1,8 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple, Union
-
 import torch.nn as nn
+from dataclasses import dataclass
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 
 @dataclass(frozen=True)
@@ -15,6 +14,12 @@ class FSDPTurboModelSpec:
     ep_modules: Tuple[str, ...]
     efsdp_modules: Tuple[str, ...]
     recompute_modules: Tuple[str, ...]
+    module_patches: Tuple[Tuple[str, str], ...] = ()
+    frozen_modules: Tuple[str, ...] = ()
+    cp_function_patches: Tuple[Tuple[str, str], ...] = ()
+    cp_module_patches: Tuple[Tuple[str, str], ...] = ()
+    native_model_factory: Optional[str] = None
+    eager_dispatcher: Optional[str] = None
 
     @staticmethod
     def matching_modules(model: nn.Module, patterns: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
@@ -34,6 +39,8 @@ class FSDPTurboModelSpec:
             'fsdp_hook_modules': self.fsdp_hook_modules,
         }
         if require_tp:
+            if not self.tp_colwise_modules or not self.tp_rowwise_modules:
+                raise ValueError(f'FSDPTurbo TP is not implemented for {self.model_type}. Use tp_size=1.')
             groups.update({
                 'tp_colwise_modules': self.tp_colwise_modules,
                 'tp_rowwise_modules': self.tp_rowwise_modules,
@@ -47,14 +54,49 @@ class FSDPTurboModelSpec:
             groups['recompute_modules'] = self.recompute_modules
 
         matches = {name: self.matching_modules(model, patterns) for name, patterns in groups.items()}
-        missing = [f'{group}:{pattern}' for group, result in matches.items() for pattern, names in result.items()
-                   if not names]
+        missing = [
+            f'{group}:{pattern}' for group, result in matches.items() for pattern, names in result.items() if not names
+        ]
         if missing:
             raise RuntimeError(f'FSDPTurbo model spec did not match declared modules: {missing}.')
         return matches
 
 
 _MODEL_SPECS = {
+    'deepseek_v41':
+    FSDPTurboModelSpec(
+        model_type='deepseek_v41',
+        fsdp_modules=('model.layers.{*}', 'model.embed', 'model.head', 'model.vision.blocks.{*}',
+                      'model.vision.patch_embed', 'model.aligner'),
+        fsdp_hook_modules=('model.layers.{*}', ),
+        tp_colwise_modules=(),
+        tp_rowwise_modules=(),
+        ep_modules=('model.layers.{*}.ffn.experts', ),
+        efsdp_modules=('model.layers.{*}.ffn.experts', ),
+        recompute_modules=(),
+        frozen_modules=('model.layers.{*}.attn.indexer', ),
+        native_model_factory='fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model',
+        eager_dispatcher='custom_native_eager_forward',
+    ),
+    'deepseek_v4':
+    FSDPTurboModelSpec(
+        model_type='deepseek_v4',
+        fsdp_modules=('model.layers.{*}', 'model.embed_tokens', 'lm_head'),
+        fsdp_hook_modules=('model.layers.{*}', ),
+        tp_colwise_modules=(),
+        tp_rowwise_modules=(),
+        ep_modules=('model.layers.{*}.mlp.experts', ),
+        efsdp_modules=('model.layers.{*}.mlp.experts', ),
+        recompute_modules=('model.layers.{*}', ),
+        module_patches=(
+            ('transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4RMSNorm.forward',
+             'fsdp_turbo.models.deepseek_v4.rms_norm_forward'),
+            ('transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4HyperConnection.forward',
+             'fsdp_turbo.models.deepseek_v4.hyper_connection_forward'),
+        ),
+        # Top-k indices have no SFT CE gradient; retain the pretrained indexer.
+        frozen_modules=('model.layers.{*}.self_attn.compressor.indexer', ),
+    ),
     'qwen3_5_moe':
     FSDPTurboModelSpec(
         model_type='qwen3_5_moe',
@@ -72,6 +114,12 @@ _MODEL_SPECS = {
         ep_modules=('model.language_model.layers.{*}.mlp.experts', ),
         efsdp_modules=('model.language_model.layers.{*}.mlp.experts', ),
         recompute_modules=('model.language_model.layers.{*}', 'model.visual.blocks.{*}'),
+        cp_function_patches=(
+            ('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.eager_attention_forward', 'full_attention'),
+            ('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet.forward', 'gated_delta_net'),
+        ),
+        cp_module_patches=(('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeModel.forward',
+                            'fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5_moe_cp.qwen3_5_moe_model_forward'), ),
     ),
 }
 

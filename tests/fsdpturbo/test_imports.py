@@ -9,8 +9,7 @@ class TestFSDPTurboImports(unittest.TestCase):
 
     def test_public_package_and_cli_import_without_optional_backend(self):
         repository = Path(__file__).resolve().parents[2]
-        script = textwrap.dedent(
-            """
+        script = textwrap.dedent("""
             import builtins
             import dataclasses
             import sys
@@ -52,11 +51,13 @@ class TestFSDPTurboImports(unittest.TestCase):
 
             FSDPTurboArguments().validate_fsdpturbo(world_size=1)
             assert callable(get_model_spec)
-            """
-        )
+            """)
 
-        result = subprocess.run(
-            [sys.executable, '-c', script], cwd=repository, capture_output=True, text=True, check=False)
+        result = subprocess.run([sys.executable, '-c', script],
+                                cwd=repository,
+                                capture_output=True,
+                                text=True,
+                                check=False)
 
         self.assertEqual(result.returncode, 0, result.stderr)
 

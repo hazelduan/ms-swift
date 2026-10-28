@@ -1,10 +1,10 @@
 import re
 import sys
+import torch
 import unittest
+from torch import nn
 from types import ModuleType, SimpleNamespace
 from unittest import mock
-
-from torch import nn
 
 from swift.fsdpturbo.model_specs import get_model_spec
 
@@ -25,6 +25,9 @@ class _DecoderLayer(nn.Module):
     def __init__(self, *, with_tp=True, with_experts=True):
         super().__init__()
         self.self_attn = _Attention(with_tp=with_tp)
+        self.linear_attn = nn.Module()
+        self.linear_attn.A_log = nn.Parameter(torch.ones(2, dtype=torch.float32))
+        self.linear_attn.norm = nn.LayerNorm(2, dtype=torch.float32)
         self.mlp = nn.Module()
         if with_experts:
             self.mlp.experts = nn.ModuleList([nn.Linear(2, 2, bias=False)])
@@ -41,9 +44,7 @@ class _SyntheticQwenMoe(nn.Module):
         self.model.visual.patch_embed = nn.Linear(2, 2, bias=False)
         self.model.visual.pos_embed = nn.Embedding(2, 2)
         self.model.language_model = nn.Module()
-        self.model.language_model.layers = nn.ModuleList([
-            _DecoderLayer(with_tp=with_tp, with_experts=with_experts)
-        ])
+        self.model.language_model.layers = nn.ModuleList([_DecoderLayer(with_tp=with_tp, with_experts=with_experts)])
         self.model.language_model.embed_tokens = nn.Embedding(2, 2)
         self.lm_head = nn.Linear(2, 2, bias=False)
 
@@ -51,6 +52,7 @@ class _SyntheticQwenMoe(nn.Module):
 class TestFSDPTurboModelSpecs(unittest.TestCase):
 
     def setUp(self):
+
         def module_name_match(pattern, name):
             regex = re.escape(pattern).replace(r'\{\*\}', r'[^.]+').replace(r'\*', r'.*')
             return re.fullmatch(regex, name) is not None
@@ -61,12 +63,11 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
         utils.__path__ = []
         str_match = ModuleType('fsdp_turbo.utils.str_match')
         str_match.module_name_match = module_name_match
-        self.backend_modules = mock.patch.dict(
-            sys.modules, {
-                'fsdp_turbo': package,
-                'fsdp_turbo.utils': utils,
-                'fsdp_turbo.utils.str_match': str_match,
-            })
+        self.backend_modules = mock.patch.dict(sys.modules, {
+            'fsdp_turbo': package,
+            'fsdp_turbo.utils': utils,
+            'fsdp_turbo.utils.str_match': str_match,
+        })
         self.backend_modules.start()
 
     def tearDown(self):
@@ -74,8 +75,7 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
 
     def test_qwen_moe_patterns_match_exact_module_boundaries(self):
         model = _SyntheticQwenMoe()
-        matches = get_model_spec(model).validate_model(
-            model, require_tp=True, require_ep=True, require_recompute=True)
+        matches = get_model_spec(model).validate_model(model, require_tp=True, require_ep=True, require_recompute=True)
         expected_counts = {
             'fsdp_modules': 6,
             'fsdp_hook_modules': 1,
