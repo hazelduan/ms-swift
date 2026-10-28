@@ -901,3 +901,7 @@ python -c "import importlib.util, megatron_adaptor, megatron.core, transformer_e
 ## NPU微信群
 
 <img src="https://raw.githubusercontent.com/modelscope/ms-swift/main/docs/resources/wechat/npu.png" width="250">
+
+### 独立 FSDPTurbo 后端的主线兼容
+
+`swift fsdpturbo sft` 的 `ep_dispatcher=eager/fused` 分别映射到当前 FSDPTurbo 的 `all2all` 调度与 `use_fused_ops=false/true`。原生 DeepSeek V4.1 保留独立的 `custom_native_eager_forward` 调度；其 checkpoint 入口现为 `fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model`。Host Engram 优化器通过后端注册工厂在 Swift trainer 中组装。更新时须同时更新 Swift 与 FSDPTurbo 兼容分支，历史性能结果仍以实验记录的提交为准。
