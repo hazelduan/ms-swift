@@ -63,6 +63,7 @@ class LLMModelType:
     telechat = 'telechat'
     telechat2 = 'telechat2'
     xing4_0 = 'xing4_0'
+    flint = 'flint'
 
     mistral = 'mistral'
     devstral = 'devstral'
@@ -170,6 +171,7 @@ class MLLMModelType:
     omnijev = 'omnijev'
     kev = 'kev'
     thx02 = 'thx02'
+    startlux = 'startlux'
 
     qwen2_gme = 'qwen2_gme'
     ovis1_6 = 'ovis1_6'
@@ -297,6 +299,7 @@ class MLLMModelType:
     monkeyocrv2 = 'monkeyocrv2'
 
     nemotron_h_omni = 'nemotron_h_omni'
+    nemo_speechlm = 'nemo_speechlm'
 
 
 class ModelType(LLMModelType, MLLMModelType, BertModelType, RMModelType):
