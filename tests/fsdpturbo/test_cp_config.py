@@ -100,7 +100,7 @@ def test_unimplemented_deepseek_cp_is_not_silently_enabled():
     from swift.fsdpturbo.trainer import build_fsdpturbo_config
 
     with pytest.raises(ValueError, match='CP is not implemented'):
-        build_fsdpturbo_config(make_args(2), get_model_spec('deepseek_v4'))
+        build_fsdpturbo_config(make_args(2), get_model_spec('deepseek_v41'))
 
 
 def test_native_v41_uses_intrinsic_reference_order_dispatcher():
@@ -154,4 +154,16 @@ def test_native_v41_rejects_unvalidated_modes_before_loading(field, value, messa
     args.router_aux_loss_coef = 0
     setattr(args, field, value)
     with pytest.raises(ValueError, match=message):
+        FSDPTurboTrainer(args, None, None, None)
+
+
+def test_native_v41_trainer_rejects_model_only_save_before_loading():
+    from swift.fsdpturbo.trainer import FSDPTurboTrainer
+
+    args = make_args(1)
+    args.model_type = 'deepseek_v41'
+    args.gradient_checkpointing = False
+    args.router_aux_loss_coef = 0
+    args.training_args.save_only_model = True
+    with pytest.raises(ValueError, match='save_only_model'):
         FSDPTurboTrainer(args, None, None, None)

@@ -19,7 +19,6 @@ class FSDPTurboModelSpec:
     cp_function_patches: Tuple[Tuple[str, str], ...] = ()
     cp_module_patches: Tuple[Tuple[str, str], ...] = ()
     native_model_factory: Optional[str] = None
-    model_class: Optional[str] = None
     eager_dispatcher: Optional[str] = None
 
     @staticmethod
@@ -78,20 +77,6 @@ _MODEL_SPECS = {
         frozen_modules=('model.layers.{*}.attn.indexer', ),
         native_model_factory='fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model',
         eager_dispatcher='custom_native_eager_forward',
-    ),
-    'deepseek_v4':
-    FSDPTurboModelSpec(
-        model_type='deepseek_v4',
-        fsdp_modules=('model.layers.{*}', 'model.embed_tokens', 'lm_head'),
-        fsdp_hook_modules=('model.layers.{*}', ),
-        tp_colwise_modules=(),
-        tp_rowwise_modules=(),
-        ep_modules=('model.layers.{*}.mlp.experts', ),
-        efsdp_modules=('model.layers.{*}.mlp.experts', ),
-        recompute_modules=('model.layers.{*}', ),
-        model_class='fsdp_turbo.models.deepseek.deepseek_v4.FSDPTurboDeepseekV4ForCausalLM',
-        # Top-k indices have no SFT CE gradient; retain the pretrained indexer.
-        frozen_modules=('model.layers.{*}.self_attn.compressor.indexer', ),
     ),
     'qwen3_5_moe':
     FSDPTurboModelSpec(

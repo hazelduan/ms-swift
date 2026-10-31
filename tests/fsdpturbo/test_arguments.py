@@ -13,11 +13,13 @@ class TestFSDPTurboArguments(unittest.TestCase):
             'fsdp': None,
             'deepspeed': None,
             'tuner_type': 'full',
+            'model_type': 'qwen3_5_moe',
             'task_type': 'causal_lm',
             'enable_npu_model_patch': False,
             'add_version': False,
             'resume_from_checkpoint': None,
             'resume_only_model': False,
+            'save_only_model': False,
             'sequence_parallel_size': 1,
             'padding_free': False,
             'packing': False,
@@ -121,6 +123,62 @@ class TestFSDPTurboArguments(unittest.TestCase):
                 mock.patch.object(SftArguments, '__post_init__', autospec=True):
             with self.assertRaises(ValueError):
                 args.__post_init__()
+
+    def test_old_deepseek_backend_and_native_checkpoint_modes_fail_before_parent_init(self):
+        cases = [
+            ({
+                'model_type': 'deepseek_v4'
+            }, 'DeepSeek V4'),
+            ({
+                'model_type': 'deepseek_v41',
+                'resume_from_checkpoint': '/checkpoint'
+            }, 'checkpoint resume'),
+            ({
+                'model_type': 'deepseek_v41',
+                'save_only_model': True
+            }, 'save_only_model'),
+        ]
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides), \
+                    mock.patch.object(SftArguments, '__post_init__', autospec=True) as init_sft, \
+                    self.assertRaisesRegex(ValueError, message):
+                self._bare_sft_args(**overrides).__post_init__()
+            init_sft.assert_not_called()
+
+    def test_native_checkpoint_gate_also_checks_the_resolved_model_type(self):
+        args = self._bare_sft_args(model_type=None, save_only_model=True)
+
+        def resolve_model_type(args):
+            args.model_type = 'deepseek_v41'
+
+        with mock.patch.object(SftArguments, '__post_init__', autospec=True, side_effect=resolve_model_type), \
+                self.assertRaisesRegex(ValueError, 'save_only_model'):
+            args.__post_init__()
+
+    def test_resolved_native_checkpoint_modes_fail_before_parent_device_initialization(self):
+        cases = [({
+            'resume_from_checkpoint': '/checkpoint'
+        }, 'checkpoint resume'), ({
+            'save_only_model': True
+        }, 'save_only_model')]
+
+        def resolve_and_initialize(args):
+            args.model_type = 'deepseek_v41'
+            args._init_device()
+
+        for overrides, message in cases:
+            args = self._bare_sft_args(model_type=None, **overrides)
+            with self.subTest(overrides=overrides), \
+                    mock.patch.object(SftArguments, '__post_init__', autospec=True,
+                                      side_effect=resolve_and_initialize), \
+                    mock.patch.object(SftArguments, '_init_device', autospec=True) as initialize_device, \
+                    self.assertRaisesRegex(ValueError, message):
+                args.__post_init__()
+            initialize_device.assert_not_called()
+
+    def test_qwen_checkpoint_modes_are_not_rejected_by_the_native_scope_gate(self):
+        args = self._bare_sft_args(resume_from_checkpoint='/checkpoint', save_only_model=True)
+        args._validate_model_scope()
 
     def test_unvalidated_checkpoint_and_accumulation_paths_are_rejected(self):
         cases = {

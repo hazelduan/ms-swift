@@ -1,10 +1,8 @@
-import re
-import sys
+import importlib.util
 import torch
 import unittest
 from torch import nn
-from types import ModuleType, SimpleNamespace
-from unittest import mock
+from types import SimpleNamespace
 
 from swift.fsdpturbo.model_specs import get_model_spec
 
@@ -49,29 +47,8 @@ class _SyntheticQwenMoe(nn.Module):
         self.lm_head = nn.Linear(2, 2, bias=False)
 
 
+@unittest.skipUnless(importlib.util.find_spec('fsdp_turbo'), 'requires the optional FSDPTurbo package')
 class TestFSDPTurboModelSpecs(unittest.TestCase):
-
-    def setUp(self):
-
-        def module_name_match(pattern, name):
-            regex = re.escape(pattern).replace(r'\{\*\}', r'[^.]+').replace(r'\*', r'.*')
-            return re.fullmatch(regex, name) is not None
-
-        package = ModuleType('fsdp_turbo')
-        package.__path__ = []
-        utils = ModuleType('fsdp_turbo.utils')
-        utils.__path__ = []
-        str_match = ModuleType('fsdp_turbo.utils.str_match')
-        str_match.module_name_match = module_name_match
-        self.backend_modules = mock.patch.dict(sys.modules, {
-            'fsdp_turbo': package,
-            'fsdp_turbo.utils': utils,
-            'fsdp_turbo.utils.str_match': str_match,
-        })
-        self.backend_modules.start()
-
-    def tearDown(self):
-        self.backend_modules.stop()
 
     def test_qwen_moe_patterns_match_exact_module_boundaries(self):
         model = _SyntheticQwenMoe()
@@ -111,6 +88,13 @@ class TestFSDPTurboModelSpecs(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             get_model_spec(model).validate_model(model)
+
+
+class TestFSDPTurboModelScope(unittest.TestCase):
+
+    def test_old_deepseek_v4_has_no_backend_plan(self):
+        with self.assertRaisesRegex(ValueError, 'No FSDPTurbo model spec'):
+            get_model_spec('deepseek_v4')
 
 
 if __name__ == '__main__':

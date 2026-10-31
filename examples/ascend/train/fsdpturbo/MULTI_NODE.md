@@ -1,6 +1,8 @@
-# 多机 A3：DeepSeek V4 Flash 与 Qwen3.5-122B-A10B
+# 多机 A3：Qwen3.5-122B-A10B
 
 本指南使用独立 `swift fsdpturbo sft` 后端。Swift 负责模型注册、模板和数据；FSDPTurbo 负责 FSDP、EP/EFSDP、优化器、梯度裁剪及 DCP checkpoint。无需 Megatron 或 mcore-bridge。
+
+当前后端保留 Qwen3.5 MoE 与原生 DeepSeek V4.1；旧 DeepSeek V4.0 backend plan 已移除。下列多机命令仅用于 Qwen。历史 DeepSeek V4 实验仍按 README 中记录的原始提交解释；不能用当前分支复现已移除的入口。V4.1 的纯文本及 checkpoint 限制见 [README](README.md)。
 
 ## 代码
 
@@ -102,12 +104,9 @@ export PYTHONPATH=/home/dxq/.codex_work/ms-swift-fsdpturbo-release:/home/dxq/fsd
 准备完整 checkpoint、tokenizer/processor 和 `config.json`。所有节点能访问同一模型路径及 JSONL 数据路径；checkpoint 输出目录必须是共享可写目录。可以使用共享文件系统，也可以预先同步输入文件。
 
 - Qwen：`Qwen/Qwen3.5-122B-A10B` BF16 checkpoint。
-- DeepSeek：`deepseek-ai/DeepSeek-V4-Flash`；其 FP8/FP4 checkpoint 会在 global rank 0 由 HF 转换为浮点训练参数。不要设置 Swift `quant_method`。FP32 稳定性参数会保留。
 - 数据采用 Swift messages 格式，例如 `{"messages":[{"role":"user","content":"问题"},{"role":"assistant","content":"答案"}]}`，每行一个样本。
 
 启动时只有 global rank 0 完整加载/转换 CPU checkpoint。各 rank 在 meta 上建模并完成 FSDP/TP/EP 分片，再通过 PyTorch DCP 逐张量广播到本地 shard。rank 0 仍需能容纳一份浮点源模型；其他 rank 不会先完整 CPU 加载。初始化完成后该源模型释放。
-
-DeepSeek 使用实例级 RMSNorm/mHC/Sinkhorn 补丁，保留原生 attention 的 causal、sliding、CSA/HCA mask。只输出 top-k 整数索引的 indexer 在 SFT 中保持 pretrained 权重；没有伪造其梯度。
 
 ## 节点数与切分
 
@@ -116,9 +115,8 @@ DeepSeek 使用实例级 RMSNorm/mHC/Sinkhorn 补丁，保留原生 attention �
 | 模型 | 节点 | 总进程 | FSDP | TP | EP | EFSDP | 每 rank batch | 全局 batch |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Qwen3.5-122B-A10B | 2 | 32 | 32 | 1 | 16 | 2 | 1 | 32 |
-| DeepSeek-V4-Flash | 4 | 64 | 64 | 1 | 32 | 2 | 1 | 64 |
 
-若每台只有 8 个逻辑 die，则对应使用 4 台和 8 台，保持总进程及切分不变。256 experts 可以整除上述 EP。Qwen 的现有 TP plan 只覆盖 full-attention q/k/v/o，首轮使用 TP1；DeepSeek 没有有效纯 TP plan，TP>1 会明确拒绝。FSDP/TP 与 EP/EFSDP 是重叠 mesh，不能把四个尺寸相乘当作 world size。
+若每台只有 8 个逻辑 die，则使用 4 台，保持总进程及切分不变。256 experts 可以整除上述 EP。Qwen 的现有 TP plan 只覆盖 full-attention q/k/v/o，首轮使用 TP1。FSDP/TP 与 EP/EFSDP 是重叠 mesh，不能把四个尺寸相乘当作 world size。
 
 ## 多机启动
 
@@ -156,25 +154,6 @@ swift fsdpturbo sft \
   --per_device_train_batch_size 1 --gradient_accumulation_steps 1 \
   --gradient_checkpointing true --vit_gradient_checkpointing true \
   --router_aux_loss_coef 0.001 \
-  --save_strategy steps --save_steps 100 --eval_strategy no \
-  --split_dataset_ratio 0 --report_to none --logging_steps 10 \
-  --dataloader_num_workers 0 --enable_npu_model_patch false --add_version false
-```
-
-DeepSeek 四节点，`NODE_RANK=0,1,2,3`：
-
-```bash
-export NNODES=4
-swift fsdpturbo sft \
-  --model /shared/models/DeepSeek-V4-Flash \
-  --dataset /shared/data/train.jsonl --output_dir /shared/output/deepseek-v4-flash \
-  --tuner_type full --torch_dtype bfloat16 --attn_impl eager \
-  --fsdp_size 64 --tp_size 1 --ep_size 32 --efsdp_size 2 \
-  --fsdp_implementation native --ep_dispatcher eager \
-  --forward_prefetch 0 --backward_prefetch 0 \
-  --max_steps 1000 --max_length 1024 --learning_rate 1e-5 \
-  --per_device_train_batch_size 1 --gradient_accumulation_steps 1 \
-  --gradient_checkpointing true --vit_gradient_checkpointing true \
   --save_strategy steps --save_steps 100 --eval_strategy no \
   --split_dataset_ratio 0 --report_to none --logging_steps 10 \
   --dataloader_num_workers 0 --enable_npu_model_patch false --add_version false

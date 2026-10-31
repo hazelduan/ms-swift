@@ -9,6 +9,14 @@ from unittest.mock import patch
 @unittest.skipUnless(importlib.util.find_spec('fsdp_turbo'), 'requires the optional FSDPTurbo package')
 class TestLossGroupInitialization(unittest.TestCase):
 
+    def test_swift_uses_the_backend_loss_reduction(self):
+        from fsdp_turbo.training.trainer import BaseTrainer
+
+        from swift.fsdpturbo.trainer import FSDPTurboTrainer
+
+        self.assertIs(
+            getattr(FSDPTurboTrainer.sync_loss, '__func__', FSDPTurboTrainer.sync_loss), BaseTrainer.sync_loss.__func__)
+
     def make_trainer(self, size):
         from swift.fsdpturbo.trainer import FSDPTurboTrainer
 

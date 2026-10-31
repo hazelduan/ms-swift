@@ -98,7 +98,7 @@ def _read_pretrained_model(args):
     native = _native_factory(args)
     if native is not None:
         return native(load_weights=True)
-    kwargs = {'device_map': 'cpu', **_hf_model_kwargs(args)}
+    kwargs = {'device_map': 'cpu'}
     if args.model_info.quant_method == 'fp8':
         from transformers import FineGrainedFP8Config
         kwargs['quantization_config'] = FineGrainedFP8Config(dequantize=True)
@@ -138,19 +138,8 @@ def create_meta_model(args):
     native = _native_factory(args)
     if native is not None:
         return native(load_weights=False)
-    model, _ = args.get_model_processor(device_map='cpu', return_dummy_model=True, **_hf_model_kwargs(args))
+    model, _ = args.get_model_processor(device_map='cpu', return_dummy_model=True)
     return model
-
-
-def _hf_model_kwargs(args):
-    from .model_specs import get_model_spec
-
-    model_type = getattr(args, 'model_type', None)
-    path = get_model_spec(model_type).model_class if model_type else None
-    if path is None:
-        return {}
-    module_name, _, name = path.rpartition('.')
-    return {'auto_model_cls': getattr(importlib.import_module(module_name), name)}
 
 
 def materialize_resume_model(model, *, device):

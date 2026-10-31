@@ -6,7 +6,6 @@ from dataclasses import replace
 from fsdp_turbo.training.trainer import BaseTrainer
 from functools import partial
 from torch.utils.data import DataLoader, DistributedSampler
-from typing import Dict, Optional
 
 from swift.pipelines.train.tuner import TunerMixin
 from swift.utils import get_logger, seed_worker
@@ -159,6 +158,9 @@ class FSDPTurboTrainer(BaseTrainer):
                 raise ValueError('Native V4.1 currently requires EP > 1, eager dispatch, and no checkpoint resume.')
             if args.router_aux_loss_coef:
                 raise ValueError('Native V4.1 router auxiliary loss is not implemented.')
+            if self.train_args.save_only_model:
+                raise ValueError('Native V4.1 save_only_model is not supported: Host Engram requires its '
+                                 'model-owned checkpoint state.')
         if args.tp_size > 1 and not (self.spec.tp_colwise_modules and self.spec.tp_rowwise_modules):
             raise ValueError(f'FSDPTurbo TP is not implemented for {args.model_type}. Use tp_size=1.')
         self._replicated_parameters = []
@@ -297,11 +299,16 @@ class FSDPTurboTrainer(BaseTrainer):
             drop_last=self.train_args.dataloader_drop_last,
         )
         workers = self.train_args.dataloader_num_workers
+        collator = partial(self.template.data_collator, padding_to=None)
+        if self.spec.model_type == 'deepseek_v41':
+            from .data import _native_text_collator
+
+            collator = partial(_native_text_collator, self.template.data_collator)
         kwargs = {
             'dataset': self.train_dataset,
             'batch_size': self.train_args.per_device_train_batch_size,
             'sampler': sampler,
-            'collate_fn': partial(self.template.data_collator, padding_to=None),
+            'collate_fn': collator,
             'num_workers': workers,
             'pin_memory': self.train_args.dataloader_pin_memory,
             'drop_last': self.train_args.dataloader_drop_last,
@@ -388,21 +395,6 @@ class FSDPTurboTrainer(BaseTrainer):
         loss = outputs.loss / self.config.run.gradient_accumulation_steps
         loss.backward()
         return loss, getattr(outputs, 'aux_loss', None)
-
-    def sync_loss(self, accumulated_losses: Dict[str, list]) -> Dict[str, Optional[torch.Tensor]]:
-        group = self.model.parallel_state.get_data_group()
-        group_size = self.model.parallel_state.get_data_group_size()
-        result = {}
-        for name, losses in accumulated_losses.items():
-            if not losses:
-                result[name] = None
-                continue
-            value = torch.stack(losses).sum()
-            if group_size > 1:
-                dist.all_reduce(value, op=dist.ReduceOp.SUM, group=group)
-                value.div_(group_size)
-            result[name] = value
-        return result
 
     @property
     def result(self):

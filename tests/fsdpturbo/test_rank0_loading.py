@@ -6,10 +6,18 @@ from torch import nn
 from types import SimpleNamespace
 from unittest import mock
 
-from swift.fsdpturbo.loading import _checked_checkpoint_read, _fp8_checkpoint_conversion, load_rank0_model
+from swift.fsdpturbo.loading import (_checked_checkpoint_read, _fp8_checkpoint_conversion, create_meta_model,
+                                     load_rank0_model)
 
 
 class TestRank0Loading(unittest.TestCase):
+
+    def test_qwen_meta_model_uses_the_swift_loader_without_class_injection(self):
+        args = SimpleNamespace(
+            model_type='qwen3_5_moe', get_model_processor=mock.Mock(return_value=(mock.sentinel.model, None)))
+
+        self.assertIs(create_meta_model(args), mock.sentinel.model)
+        args.get_model_processor.assert_called_once_with(device_map='cpu', return_dummy_model=True)
 
     def test_missing_checkpoint_weight_is_not_randomly_initialized(self):
         from safetensors.torch import load_file, save_file

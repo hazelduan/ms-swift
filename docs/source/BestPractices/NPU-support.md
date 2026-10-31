@@ -906,4 +906,6 @@ python -c "import importlib.util, megatron_adaptor, megatron.core, transformer_e
 
 `swift fsdpturbo sft` 的 `ep_dispatcher=eager/fused` 分别映射到当前 FSDPTurbo 的 `all2all` 调度与 `use_fused_ops=false/true`。原生 DeepSeek V4.1 保留独立的 `custom_native_eager_forward` 调度；其 checkpoint 入口现为 `fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model`。Host Engram 优化器通过后端注册工厂在 Swift trainer 中组装。更新时须同时更新 Swift 与 FSDPTurbo 兼容分支，历史性能结果仍以实验记录的提交为准。
 
+当前后端模型计划保留 Qwen3.5 MoE 和原生 DeepSeek V4.1，旧 DeepSeek V4.0 入口已移除。V4.1 仅接收纯文本、右 padding 的 Swift batch；CPU collator 校验文本类型与连续位置后转换为原生输入，实际图像会明确拒绝。V4.1 的 `resume_from_checkpoint` 和 `save_only_model` 在参数初始化时拒绝，Qwen HF 路线的恢复能力不变。loss 日志复用后端的 FP32 data/CP 归约。
+
 后端默认使用 `adamw_torch`，保留 Swift 的 bias/norm 免衰减参数组，拒绝未实现的 fused/8-bit 变体。恢复训练要求优化器参数组结构一致；旧 Swift 单组 AdamW checkpoint 不能直接恢复到修正后的双组实现。旧 checkpoint 元数据兼容不包含优化器分组转换。

@@ -68,7 +68,18 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
     add_version: bool = False
     optim: str = 'adamw_torch'
 
+    def _validate_model_scope(self):
+        if self.model_type == 'deepseek_v4':
+            raise ValueError('DeepSeek V4 is no longer supported by the FSDPTurbo backend.')
+        if self.model_type == 'deepseek_v41':
+            if self.resume_from_checkpoint:
+                raise ValueError('Native V4.1 checkpoint resume is not supported.')
+            if self.save_only_model:
+                raise ValueError('Native V4.1 save_only_model is not supported: Host Engram requires its '
+                                 'model-owned checkpoint state.')
+
     def _init_device(self):
+        self._validate_model_scope()
         super()._init_device()
         from swift.utils import init_process_group, is_dist
 
@@ -96,6 +107,7 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
 
     def __post_init__(self) -> None:
         self.validate_fsdpturbo()
+        self._validate_model_scope()
         if self.enable_npu_model_patch:
             raise ValueError('FSDPTurbo requires `--enable_npu_model_patch false` before Swift model imports.')
         if self.add_version:
@@ -115,6 +127,7 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.padding_free or self.packing:
             raise ValueError('FSDPTurbo padding-free and packing paths have not been validated yet.')
         super().__post_init__()
+        self._validate_model_scope()
         self.validate_fsdpturbo()
         if self.task_type != 'causal_lm':
             raise ValueError('The initial FSDPTurbo backend supports causal-LM SFT only.')
