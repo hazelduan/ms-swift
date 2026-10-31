@@ -68,7 +68,11 @@ def main():
                 expert_fully_shard_parallel_size=2,
                 fsdp_plan=FSDPPlanConfig(apply_modules={'proj': {}}, ignored_params=['stable']),
                 tp_plan=TPPlanConfig(colwise_parallel=['proj'], rowwise_parallel=[], sequence_parallel=[]),
-                ep_plan=EPPlanConfig(apply_modules=['experts'], apply_efsdp_modules=['experts'], dispatcher='eager'),
+                ep_plan=EPPlanConfig(
+                    apply_modules=['experts'],
+                    apply_efsdp_modules=['experts'],
+                    dispatcher='all2all',
+                    use_fused_ops=False),
             ))
         wrapped = FSDPTurbo(config, model)
         materialize_sharded_model(wrapped.model, source)
