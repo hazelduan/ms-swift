@@ -66,6 +66,7 @@ class FSDPTurboArguments:
 class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
     tuner_type: Literal['full'] = 'full'
     add_version: bool = False
+    optim: str = 'adamw_torch'
 
     def _init_device(self):
         super()._init_device()
@@ -129,8 +130,8 @@ class FSDPTurboSftArguments(FSDPTurboArguments, SftArguments):
         if self.optimizer is not None or self.use_galore:
             raise ValueError('The initial FSDPTurbo backend supports its native AdamW optimizer only.')
         optim = getattr(self.training_args.optim, 'value', self.training_args.optim)
-        if not str(optim).startswith('adamw'):
-            raise ValueError(f'FSDPTurbo supports AdamW only, got optim={optim!r}.')
+        if optim != 'adamw_torch':
+            raise ValueError(f'FSDPTurbo supports native AdamW (`--optim adamw_torch`) only, got {optim!r}.')
         if self.loss_type is not None or self.enable_dft_loss or self.enable_channel_loss:
             raise ValueError('Swift custom loss plugins are not supported by the initial FSDPTurbo backend.')
         if self.label_smoothing_factor:

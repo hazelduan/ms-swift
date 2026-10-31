@@ -10,6 +10,8 @@ from unittest import mock
 class TestFSDPTurboDtypePolicy(unittest.TestCase):
 
     def test_build_model_preserves_loader_selected_parameter_dtypes(self):
+        from fsdp_turbo.fsdp_turbo_config import FSDPTurboConfig
+
         from swift.fsdpturbo.trainer import FSDPTurboTrainer
         from swift.pipelines.train.tuner import TunerMixin
 
@@ -43,10 +45,8 @@ class TestFSDPTurboDtypePolicy(unittest.TestCase):
             validate_model=mock.Mock(),
             matching_modules=mock.Mock(return_value={}),
         )
-        trainer.config = SimpleNamespace(
-            model=SimpleNamespace(torch_dtype=torch.bfloat16),
-            distributed=SimpleNamespace(fsdp_plan=SimpleNamespace(ignored_params=[])),
-        )
+        trainer.config = FSDPTurboConfig()
+        original_config = trainer.config
 
         dtypes = {name: param.dtype for name, param in model.named_parameters()}
         with mock.patch.object(TunerMixin, 'prepare_model', return_value=model), \
@@ -58,6 +58,7 @@ class TestFSDPTurboDtypePolicy(unittest.TestCase):
 
         self.assertIs(result.model, model)
         self.assertEqual(trainer.config.distributed.fsdp_plan.ignored_params, ['sensitive'])
+        self.assertEqual(original_config.distributed.fsdp_plan.ignored_params, [])
         self.assertEqual(model.regular.dtype, torch.bfloat16)
         self.assertEqual(model.sensitive.dtype, torch.float32)
         self.assertEqual(model.indices.dtype, torch.int64)

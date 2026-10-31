@@ -2,6 +2,7 @@
 import math
 import torch
 import torch.distributed as dist
+from dataclasses import replace
 from fsdp_turbo.training.trainer import BaseTrainer
 from functools import partial
 from torch.utils.data import DataLoader, DistributedSampler
@@ -64,7 +65,7 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
             clip_grad=train_args.max_grad_norm,
         ),
         data=DataConfig(
-            dataset_path=','.join(args.dataset or args.cached_dataset),
+            dataset_path=','.join((args.dataset or []) + (args.cached_dataset or [])),
             batch_size=train_args.per_device_train_batch_size,
             max_seq_length=args.max_length,
             num_workers=train_args.dataloader_num_workers,
@@ -74,7 +75,8 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
         run=TrainRunConfig(
             seed=train_args.seed,
             max_steps=train_args.max_steps,
-            num_train_epochs=math.ceil(train_args.num_train_epochs),
+            # A positive max_steps owns termination, even for one-batch epochs.
+            num_train_epochs=train_args.max_steps,
             gradient_accumulation_steps=train_args.gradient_accumulation_steps,
             logging_steps=train_args.logging_steps,
         ),
@@ -169,8 +171,6 @@ class FSDPTurboTrainer(BaseTrainer):
         steps_per_epoch = len(self.dataloader)
         if steps_per_epoch < 1:
             raise ValueError('FSDPTurbo requires at least one local training batch per epoch.')
-        required_epochs = math.ceil(self.train_args.max_steps / steps_per_epoch)
-        self.config.run.num_train_epochs = max(self.config.run.num_train_epochs, required_epochs)
 
     def _initialize_loss_group(self):
         # HCCL allocates communicator buffers lazily. Initialize the separate
@@ -221,7 +221,11 @@ class FSDPTurboTrainer(BaseTrainer):
             for name, param in model.named_parameters()
             if param.dtype == torch.float32 and self.args.torch_dtype != torch.float32
         }
-        self.config.distributed.fsdp_plan.ignored_params = sorted(parameter_names)
+        self.config = replace(
+            self.config,
+            distributed=replace(
+                self.config.distributed,
+                fsdp_plan=replace(self.config.distributed.fsdp_plan, ignored_params=sorted(parameter_names))))
         if hasattr(model.config, 'use_cache'):
             model.config.use_cache = False
         if self.args.router_aux_loss_coef:
@@ -330,28 +334,40 @@ class FSDPTurboTrainer(BaseTrainer):
         return builder(factory) if callable(builder) else factory(optimizer=self.optimizer)
 
     def build_optimizer(self):
-        if self.spec.model_type != 'deepseek_v41':
-            return super().build_optimizer()
-        from fsdp_turbo.models.deepseek.deepseek_v41.engram.engram_optimizer import register_engram_optimizers
-        from fsdp_turbo.models.deepseek.deepseek_v41.engram.host_offload_engram import host_engram_tables
         from fsdp_turbo.quantization.cache import hook_optimizer_step
         from fsdp_turbo.training.factories import OptimizerFactory
+        from transformers import Trainer
 
-        tables = host_engram_tables(self.model)
-        if not tables:
-            return super().build_optimizer()
-        register_engram_optimizers(OptimizerFactory)
+        tables = []
+        if self.spec.model_type == 'deepseek_v41':
+            from fsdp_turbo.models.deepseek.deepseek_v41.engram.engram_optimizer import register_engram_optimizers
+            from fsdp_turbo.models.deepseek.deepseek_v41.engram.host_offload_engram import host_engram_tables
+
+            tables = host_engram_tables(self.model)
+            register_engram_optimizers(OptimizerFactory)
+        sparse_ids = {id(table.weight) for table in tables}
+        decay_names = set(Trainer.get_decay_parameter_names(None, self.model))
         config = self.config.optimizer
-        optimizer = OptimizerFactory.create(
-            'EngramOptimizer',
-            self.model,
-            tables,
-            dense_optimizer_type=config.optimizer_type,
-            lr=config.lr,
-            weight_decay=config.weight_decay,
-            betas=(config.adam_beta1, config.adam_beta2),
-            eps=config.adam_epsilon)
-        hook_optimizer_step(self.model, optimizer.dense_optimizer)
+        groups = [{
+            'params': [
+                parameter for name, parameter in self.model.named_parameters()
+                if parameter.requires_grad and id(parameter) not in sparse_ids and (name in decay_names) == decay
+            ],
+            'weight_decay':
+            config.weight_decay if decay else 0.0,
+        } for decay in (True, False)]
+        kwargs = dict(lr=config.lr, betas=(config.adam_beta1, config.adam_beta2), eps=config.adam_epsilon)
+        if tables:
+            optimizer = OptimizerFactory.create(
+                'EngramOptimizer',
+                self.model,
+                tables,
+                dense_optimizer_type=config.optimizer_type,
+                dense_param_groups=groups,
+                **kwargs)
+        else:
+            optimizer = OptimizerFactory.create(config.optimizer_type, groups, **kwargs)
+        hook_optimizer_step(self.model, optimizer.dense_optimizer if tables else optimizer)
         return optimizer
 
     def train_step(self, batch):

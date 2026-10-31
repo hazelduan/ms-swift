@@ -19,6 +19,7 @@ class FSDPTurboModelSpec:
     cp_function_patches: Tuple[Tuple[str, str], ...] = ()
     cp_module_patches: Tuple[Tuple[str, str], ...] = ()
     native_model_factory: Optional[str] = None
+    model_class: Optional[str] = None
     eager_dispatcher: Optional[str] = None
 
     @staticmethod
@@ -88,12 +89,7 @@ _MODEL_SPECS = {
         ep_modules=('model.layers.{*}.mlp.experts', ),
         efsdp_modules=('model.layers.{*}.mlp.experts', ),
         recompute_modules=('model.layers.{*}', ),
-        module_patches=(
-            ('transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4RMSNorm.forward',
-             'fsdp_turbo.models.deepseek_v4.rms_norm_forward'),
-            ('transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4HyperConnection.forward',
-             'fsdp_turbo.models.deepseek_v4.hyper_connection_forward'),
-        ),
+        model_class='fsdp_turbo.models.deepseek.deepseek_v4.FSDPTurboDeepseekV4ForCausalLM',
         # Top-k indices have no SFT CE gradient; retain the pretrained indexer.
         frozen_modules=('model.layers.{*}.self_attn.compressor.indexer', ),
     ),

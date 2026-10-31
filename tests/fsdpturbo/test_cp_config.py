@@ -40,6 +40,7 @@ def make_args(cp_size):
         model='/local/model',
         torch_dtype=torch.bfloat16,
         dataset=['/local/data.jsonl'],
+        cached_dataset=[],
         max_length=256,
         output_dir='/local/output',
         resume_from_checkpoint=None,
@@ -67,6 +68,21 @@ def test_cp1_does_not_enable_model_or_loss_patches():
     assert config.module_patches == []
     assert config.distributed.cp_plan.ulysses_function_patches == []
     assert config.distributed.cp_plan.loss_function_patches == []
+
+
+def test_checkpoint_identity_includes_raw_and_cached_training_inputs():
+    from fsdp_turbo.training.checkpoint import dataset_fingerprint
+
+    from swift.fsdpturbo.trainer import build_fsdpturbo_config
+
+    args = make_args(1)
+    args.cached_dataset = ['/local/cache_A']
+    first = build_fsdpturbo_config(args, get_model_spec('qwen3_5_moe'))
+    args.cached_dataset = ['/local/cache_B']
+    second = build_fsdpturbo_config(args, get_model_spec('qwen3_5_moe'))
+    assert '/local/data.jsonl' in first.data.dataset_path
+    assert '/local/cache_A' in first.data.dataset_path
+    assert dataset_fingerprint(first.data) != dataset_fingerprint(second.data)
 
 
 def test_qwen_cp2_uses_backend_gdn_and_postfusion_interfaces():
