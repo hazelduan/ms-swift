@@ -75,7 +75,7 @@ _MODEL_SPECS = {
         efsdp_modules=('model.layers.{*}.ffn.experts', ),
         recompute_modules=(),
         frozen_modules=('model.layers.{*}.attn.indexer', ),
-        native_model_factory='fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model',
+        native_model_factory='fsdp_turbo.models.deepseek.deepseek_v41.adapter.build_deepseek_v41_model',
         eager_dispatcher='custom_native_eager_forward',
     ),
     'qwen3_5_moe':

@@ -41,6 +41,7 @@ class TestFSDPTurboDtypePolicy(unittest.TestCase):
         trainer.processor = mock.sentinel.processor
         trainer.train_args = SimpleNamespace(device='cpu')
         trainer.spec = SimpleNamespace(
+            native_model_factory=None,
             frozen_modules=(),
             validate_model=mock.Mock(),
             matching_modules=mock.Mock(return_value={}),

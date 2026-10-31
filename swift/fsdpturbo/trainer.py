@@ -202,12 +202,15 @@ class FSDPTurboTrainer(BaseTrainer):
     def build_model(self):
         from .loading import create_meta_model, load_rank0_model, materialize_resume_model, materialize_sharded_model
 
-        source_model, dtypes = load_rank0_model(self.args)
+        native = self.spec.native_model_factory is not None
+        if not native:
+            source_model, dtypes = load_rank0_model(self.args)
         from accelerate import init_empty_weights
         with init_empty_weights(include_buffers=False):
             model = create_meta_model(self.args)
-        for name, param in model.named_parameters():
-            param.data = param.data.to(dtypes[name])
+        if not native:
+            for name, param in model.named_parameters():
+                param.data = param.data.to(dtypes[name])
         model = TunerMixin.prepare_model(self.args, model, template=self.template, train_dataset=self.train_dataset)
         for names in self.spec.matching_modules(model, self.spec.frozen_modules).values():
             for name in names:
@@ -242,7 +245,12 @@ class FSDPTurboTrainer(BaseTrainer):
 
         logger.info('Applying the independent FSDPTurbo parallel backend.')
         model = FSDPTurbo(self.config, model)
-        if self.args.resume_from_checkpoint:
+        if native:
+            model.model.from_pretrained(
+                self.args.model,
+                load_device=torch.device('cpu') if self.args.offload_params else self.train_args.device,
+                engram_rows_per_chunk=4096)
+        elif self.args.resume_from_checkpoint:
             device = 'cpu' if self.args.offload_params else self.train_args.device
             materialize_resume_model(model.model, device=device)
         else:

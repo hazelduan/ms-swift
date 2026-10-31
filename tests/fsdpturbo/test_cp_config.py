@@ -110,7 +110,7 @@ def test_native_v41_uses_intrinsic_reference_order_dispatcher():
     args.gradient_checkpointing = False
     spec = get_model_spec('deepseek_v41')
     config = build_fsdpturbo_config(args, spec)
-    assert spec.native_model_factory.endswith('pretrained.build_pretrained_model')
+    assert spec.native_model_factory.endswith('adapter.build_deepseek_v41_model')
     assert config.distributed.ep_plan.dispatcher == 'custom_native_eager_forward'
     assert not config.memory.recompute
     assert not spec.tp_colwise_modules and not spec.cp_function_patches

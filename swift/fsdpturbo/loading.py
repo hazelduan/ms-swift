@@ -1,8 +1,13 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""HF checkpoint conversion on rank 0, followed by FSDP/TP/EP shard loading."""
+"""HF rank-zero loading and native model construction for the Swift backend."""
 import importlib
+import json
+import torch
 import torch.distributed as dist
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -95,9 +100,6 @@ def load_rank0_model(args):
 
 
 def _read_pretrained_model(args):
-    native = _native_factory(args)
-    if native is not None:
-        return native(load_weights=True)
     kwargs = {'device_map': 'cpu'}
     if args.model_info.quant_method == 'fp8':
         from transformers import FineGrainedFP8Config
@@ -124,20 +126,31 @@ def _native_factory(args):
     path = get_model_spec(model_type).native_model_factory
     if path is None:
         return None
+    if args.torch_dtype != torch.bfloat16:
+        raise ValueError('Native DeepSeek-V4.1 pretrained training requires BF16.')
     module_name, _, name = path.rpartition('.')
-    factory = getattr(importlib.import_module(module_name), name)
-    return partial(
-        factory,
-        args.model,
-        dtype=args.torch_dtype,
-        max_seq_len=args.max_length,
-        max_batch_size=args.training_args.per_device_train_batch_size)
+    module = importlib.import_module(module_name)
+    factory = getattr(module, name)
+    from transformers import PreTrainedTokenizerFast
+
+    model_args = module.build_deepseek_v41_model_args(model_name_or_path=args.model)
+    model_args = replace(
+        model_args, max_seq_len=args.max_length, max_batch_size=args.training_args.per_device_train_batch_size)
+    return partial(factory, model_args=model_args, tokenizer=PreTrainedTokenizerFast.from_pretrained(Path(args.model)))
 
 
 def create_meta_model(args):
     native = _native_factory(args)
     if native is not None:
-        return native(load_weights=False)
+        model = native()
+        config = json.loads((Path(args.model) / 'config.json').read_text())
+        model.config = SimpleNamespace(**config)
+        if config.get('text_config'):
+            model.config.text_config = SimpleNamespace(**config['text_config'])
+        if config.get('vision_config'):
+            model.config.vision_config = SimpleNamespace(**config['vision_config'])
+        model.model.head.weight.data = model.model.head.weight.data.to(torch.bfloat16)
+        return model
     model, _ = args.get_model_processor(device_map='cpu', return_dummy_model=True)
     return model
 
@@ -160,20 +173,12 @@ def materialize_sharded_model(model, source_model, *, offload=False):
     """
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
-    with ExitStack() as stack:
-        for candidate in (model, source_model):
-            context = getattr(candidate, 'canonical_load_context', None)
-            if callable(context):
-                stack.enter_context(context())
-        state_dict = source_model.state_dict() if source_model is not None else {}
-        set_model_state_dict(
-            model,
-            state_dict,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, cpu_offload=offload),
-        )
-    load_shards = getattr(model, 'load_pretrained_shards', None)
-    if callable(load_shards):
-        load_shards()
+    state_dict = source_model.state_dict() if source_model is not None else {}
+    set_model_state_dict(
+        model,
+        state_dict,
+        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, cpu_offload=offload),
+    )
     missing = [name for name, tensor in list(model.named_parameters()) + list(model.named_buffers()) if tensor.is_meta]
     if missing:
         raise RuntimeError(f'FSDPTurbo checkpoint left meta tensors: {missing}')

@@ -905,7 +905,7 @@ If they do not match, fix the environment variables before continuing with model
 
 ### Upstream compatibility of the independent FSDPTurbo backend
 
-For `swift fsdpturbo sft`, `ep_dispatcher=eager/fused` maps to the current FSDPTurbo `all2all` dispatcher with `use_fused_ops=false/true`. Native DeepSeek V4.1 retains `custom_native_eager_forward`; its checkpoint factory is now `fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model`. The Swift trainer assembles Host Engram optimizers through the backend registry. Update the Swift and FSDPTurbo compatibility branches together; historical performance results remain tied to their recorded commits.
+For `swift fsdpturbo sft`, `ep_dispatcher=eager/fused` maps to the current FSDPTurbo `all2all` dispatcher with `use_fused_ops=false/true`. Native DeepSeek V4.1 retains `custom_native_eager_forward`; model construction uses `fsdp_turbo.models.deepseek.deepseek_v41.adapter.build_deepseek_v41_model`, followed by native `from_pretrained` loading after EP/FSDP sharding. The Swift trainer assembles Host Engram optimizers through the backend registry. Update the Swift and FSDPTurbo compatibility branches together; historical performance results remain tied to their recorded commits.
 
 The current backend plans cover Qwen3.5 MoE and native DeepSeek V4.1; the earlier DeepSeek V4 backend entry has been removed. V4.1 accepts text-only, right-padded Swift batches. Its CPU collator validates text types and contiguous positions before converting native inputs, and rejects actual images. Native `resume_from_checkpoint` and `save_only_model` fail during argument initialization; Qwen HF resume remains available. Loss logging uses the backend's FP32 data/CP reduction.
 
