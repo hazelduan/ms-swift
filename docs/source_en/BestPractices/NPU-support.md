@@ -906,3 +906,5 @@ If they do not match, fix the environment variables before continuing with model
 ### Upstream compatibility of the independent FSDPTurbo backend
 
 For `swift fsdpturbo sft`, `ep_dispatcher=eager/fused` maps to the current FSDPTurbo `all2all` dispatcher with `use_fused_ops=false/true`. Native DeepSeek V4.1 retains `custom_native_eager_forward`; its checkpoint factory is now `fsdp_turbo.models.deepseek.deepseek_v41.pretrained.build_pretrained_model`. The Swift trainer assembles Host Engram optimizers through the backend registry. Update the Swift and FSDPTurbo compatibility branches together; historical performance results remain tied to their recorded commits.
+
+The backend defaults to `adamw_torch`, preserves Swift's bias/norm no-decay groups, and rejects unimplemented fused/8-bit variants. Resume requires the same optimizer parameter-group structure: older Swift single-group AdamW checkpoints cannot directly resume with the corrected two-group implementation. Legacy checkpoint metadata compatibility does not convert optimizer groups.

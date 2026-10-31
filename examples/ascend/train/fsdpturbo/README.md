@@ -53,6 +53,8 @@ DeepSeek V4.1 uses a native model factory in the existing model-spec registry, n
 
 Only global rank 0 loads and converts pretrained CPU weights. All ranks construct on meta and apply the backend's sharding first; PyTorch DCP broadcasts one tensor at a time into local shards. FP8/FP4 checkpoint weights are dequantized to the requested training dtype while FP32 stability parameters are preserved. On resume, only tensor metadata is read before local-shard allocation; original pretrained weights are not loaded again.
 
+Resume also requires the same optimizer parameter-group structure. Older Swift single-group AdamW checkpoints require explicit migration before using the corrected decay/no-decay groups; legacy metadata compatibility does not convert optimizer groups.
+
 The results establish only the tested short-sequence full-SFT configurations. They do not establish long-context throughput or convergence. The earlier eight-device experiments did not test checkpoint resume; the latest tests below do.
 
 ## Large-model startup validation (2026-10-08)
