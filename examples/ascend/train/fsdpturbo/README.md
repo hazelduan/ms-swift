@@ -4,7 +4,7 @@
 
 ## Source pair
 
-Install this Swift checkout and pin FSDPTurbo to [`89101ea46ec30dfcdaff21edc71b052d1f1b6046`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/89101ea46ec30dfcdaff21edc71b052d1f1b6046), based on upstream `6d69def`. The compatibility changes contain model/optional-dependency import fixes, native FSDP import isolation, eager MoE inverse-map and CUDA grouped-matmul fixes, parameter exclusions, Engram dense parameter groups, and owner-local HF initial loading into EFSDP intermediate shards. Native V4.1 uses the upstream BF16 builder and sharded loader; it does not require a fork-specific checkpoint decoder or `load_device` argument. Transformers 5.16 or newer is required by the paired backend.
+Install this Swift checkout and pin FSDPTurbo to [`7399bdf3cbaf09560141e11572f41f10832222e6`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/7399bdf3cbaf09560141e11572f41f10832222e6), based on upstream `6d69def`. The compatibility changes contain model/optional-dependency import fixes, native FSDP import isolation, eager MoE inverse-map and CUDA grouped-matmul fixes, parameter exclusions, Engram dense parameter groups, and owner-local HF initial loading into EFSDP intermediate shards, Triton device-property queries, and TP-local Ulysses GQA heads. Native V4.1 uses the upstream BF16 builder and sharded loader; it does not require a fork-specific checkpoint decoder or `load_device` argument. Transformers 5.16 or newer is required by the paired backend.
 
 ## Native DeepSeek V4.1
 
