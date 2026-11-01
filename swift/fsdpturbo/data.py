@@ -1,5 +1,14 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import math
 import torch
+import torch.nn.functional as F
+
+
+def _native_cp_alignment(model_args, cp_size):
+    if cp_size == 1:
+        return 1
+    ratios = (ratio for ratio in model_args.compress_ratios[:model_args.n_layers] if ratio > 1)
+    return cp_size * math.lcm(1, *ratios)
 
 
 def _normalize_native_text_batch(batch):
@@ -43,5 +52,17 @@ def _normalize_native_text_batch(batch):
     return batch
 
 
-def _native_text_collator(data_collator, rows):
-    return _normalize_native_text_batch(data_collator(rows, padding_to=None))
+def _native_text_collator(data_collator, rows, *, sequence_alignment=1, pad_token_id=0):
+    batch = _normalize_native_text_batch(data_collator(rows, padding_to=None))
+    if sequence_alignment > 1:
+        # Native text CP accepts sharded IDs and complete unshifted labels;
+        # redundant text-only token types must not select the image path.
+        batch.pop('token_types', None)
+        padding = -batch['input_ids'].shape[1] % sequence_alignment
+        if padding:
+            if batch.get('attention_mask') is None:
+                batch['attention_mask'] = torch.ones_like(batch['input_ids'])
+            for name, value in [('input_ids', pad_token_id), ('attention_mask', 0), ('labels', -100)]:
+                if batch.get(name) is not None:
+                    batch[name] = F.pad(batch[name], (0, padding), value=value)
+    return batch

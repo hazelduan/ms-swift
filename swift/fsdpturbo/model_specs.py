@@ -1,7 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import torch.nn as nn
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple, Union
+from typing import Dict, Iterable, Literal, Optional, Tuple, Union
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class FSDPTurboModelSpec:
     cp_module_patches: Tuple[Tuple[str, str], ...] = ()
     native_model_factory: Optional[str] = None
     eager_dispatcher: Optional[str] = None
+    cp_implementation: Literal['ulysses', 'kv_allgather', 'kcp'] = 'ulysses'
 
     @staticmethod
     def matching_modules(model: nn.Module, patterns: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
@@ -69,14 +70,15 @@ _MODEL_SPECS = {
         fsdp_modules=('model.layers.{*}', 'model.embed', 'model.head', 'model.vision.blocks.{*}',
                       'model.vision.patch_embed', 'model.aligner'),
         fsdp_hook_modules=('model.layers.{*}', ),
-        tp_colwise_modules=(),
-        tp_rowwise_modules=(),
+        tp_colwise_modules=('model.layers.{*}.ffn.shared_experts.w1', 'model.layers.{*}.ffn.shared_experts.w3'),
+        tp_rowwise_modules=('model.layers.{*}.ffn.shared_experts.w2', ),
         ep_modules=('model.layers.{*}.ffn.experts', ),
         efsdp_modules=('model.layers.{*}.ffn.experts', ),
-        recompute_modules=(),
+        recompute_modules=('model.layers.{*}', ),
         frozen_modules=('model.layers.{*}.attn.indexer', ),
         native_model_factory='fsdp_turbo.models.deepseek.deepseek_v41.adapter.build_deepseek_v41_model',
         eager_dispatcher='custom_native_eager_forward',
+        cp_implementation='kv_allgather',
     ),
     'qwen3_5_moe':
     FSDPTurboModelSpec(

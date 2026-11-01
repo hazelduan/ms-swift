@@ -2,6 +2,7 @@
 import math
 import torch
 import torch.distributed as dist
+from dataclasses import replace
 from fsdp_turbo.training.trainer import BaseTrainer
 from functools import partial
 from torch.utils.data import DataLoader, DistributedSampler
@@ -30,6 +31,14 @@ def _scheduler_name(train_args) -> str:
     return getattr(train_args.lr_scheduler_type, 'value', train_args.lr_scheduler_type)
 
 
+def _cp_implementation(args, spec):
+    requested = getattr(args, 'cp_implementation', 'auto')
+    selected = spec.cp_implementation if requested == 'auto' else requested
+    if args.cp_size > 1 and selected != spec.cp_implementation:
+        raise ValueError(f'{spec.model_type} supports {spec.cp_implementation} CP, not {selected}.')
+    return selected
+
+
 def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
     from fsdp_turbo.fsdp_turbo_config import (CheckpointConfig, CPPlanConfig, DataConfig, DistributedConfig,
                                               EPPlanConfig, FSDPPlanConfig, FSDPTurboConfig, MemoryConfig, ModelConfig,
@@ -38,9 +47,15 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
     train_args = args.training_args
     _validate_dtype(train_args)
     cp_size = args.cp_size
-    if cp_size > 1 and not spec.cp_function_patches:
+    cp_implementation = _cp_implementation(args, spec)
+    native_cp = spec.native_model_factory and cp_implementation == 'kv_allgather'
+    if cp_size > 1 and not (native_cp or spec.cp_function_patches):
         raise ValueError(f'FSDPTurbo CP is not implemented for {spec.model_type}. Use cp_size=1.')
     module_patches = spec.module_patches + (spec.cp_module_patches if cp_size > 1 else ())
+    cp_patches = [{
+        'target_functions': [target],
+        'type': patch_type
+    } for target, patch_type in spec.cp_function_patches] if cp_size > 1 else []
     return FSDPTurboConfig(
         module_patches=[{
             'target': target,
@@ -88,16 +103,15 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
         distributed=DistributedConfig(
             fully_shard_parallel_size=args.fsdp_size,
             tensor_parallel_size=args.tp_size,
-            ulysses_parallel_size=cp_size,
+            ulysses_parallel_size=cp_size if cp_implementation == 'ulysses' else 1,
+            kv_allgather_parallel_size=cp_size if cp_implementation == 'kv_allgather' else 1,
+            kcp_parallel_size=cp_size if cp_implementation == 'kcp' else 1,
             cp_plan=CPPlanConfig(
-                ulysses_function_patches=[{
-                    'target_functions': [target],
-                    'type': patch_type
-                } for target, patch_type in spec.cp_function_patches] if cp_size > 1 else [],
+                **{f'{cp_implementation}_function_patches': cp_patches},
                 loss_function_patches=[{
                     'target_functions': ['transformers.loss.loss_utils.ForCausalLMLoss'],
                     'type': 'causal_lm_loss'
-                }] if cp_size > 1 else [],
+                }] if cp_size > 1 and not native_cp else [],
             ),
             expert_parallel_size=args.ep_size,
             expert_fully_shard_parallel_size=args.efsdp_size,
@@ -151,8 +165,10 @@ class FSDPTurboTrainer(BaseTrainer):
         self.train_dataset = train_dataset
         self.spec = get_model_spec(args.model_type)
         if self.spec.native_model_factory:
-            if args.gradient_checkpointing:
-                raise ValueError('Native V4.1 CSA2 shared runtime does not support recompute yet.')
+            if args.gradient_checkpointing and not (args.cp_size > 1
+                                                    and _cp_implementation(args, self.spec) == 'kv_allgather'):
+                raise ValueError('Native V4.1 ordinary shared runtime does not support recompute; '
+                                 'use KV-AllGather CP > 1 for block recomputation.')
             if args.ep_size < 2 or args.ep_dispatcher != 'eager' or args.resume_from_checkpoint:
                 raise ValueError('Native V4.1 currently requires EP > 1, eager dispatch, and no checkpoint resume.')
             if args.router_aux_loss_coef:
@@ -162,6 +178,7 @@ class FSDPTurboTrainer(BaseTrainer):
                                  'model-owned checkpoint state.')
         if args.tp_size > 1 and not (self.spec.tp_colwise_modules and self.spec.tp_rowwise_modules):
             raise ValueError(f'FSDPTurbo TP is not implemented for {args.model_type}. Use tp_size=1.')
+        self._replicated_parameters = []
         super().__init__(config=build_fsdpturbo_config(args, self.spec))
         self.processor = processor
 
@@ -203,6 +220,7 @@ class FSDPTurboTrainer(BaseTrainer):
         native = self.spec.native_model_factory is not None
         if not native:
             source_model, dtypes = load_rank0_model(self.args)
+        parameter_names = set()
         if native:
             # Follow the upstream native lifecycle: build, normalize dtype and
             # place modules, wrap parallelism, then stream pretrained shards.
@@ -228,18 +246,24 @@ class FSDPTurboTrainer(BaseTrainer):
             from fsdp_turbo.models.deepseek.deepseek_v41.adapter import prepare_deepseek_v41_model_for_fsdp
 
             model = prepare_deepseek_v41_model_for_fsdp(
-                model, device=self.train_args.device, parameter_dtype=torch.bfloat16)
+                model,
+                device=torch.device('cpu') if self.args.offload_params else self.train_args.device,
+                parameter_dtype=torch.bfloat16)
         else:
-            # The minimal backend follows the upstream uniform-parameter dtype
-            # contract. Models requiring replicated mixed-dtype parameters need
-            # a separately validated backend capability.
-            mixed = [
-                name for name, parameter in model.named_parameters()
-                if parameter.is_floating_point() and parameter.dtype != self.args.torch_dtype
-            ]
-            if mixed:
-                raise ValueError('Minimal FSDPTurbo requires a uniform parameter dtype; '
-                                 f'mixed-dtype parameters: {mixed[:10]}')
+            parameter_names = {
+                name
+                for name, parameter in model.named_parameters()
+                if parameter.dtype == torch.float32 and self.args.torch_dtype != torch.float32
+            }
+            if parameter_names:
+                self.config = replace(
+                    self.config,
+                    distributed=replace(
+                        self.config.distributed,
+                        fsdp_plan=replace(
+                            self.config.distributed.fsdp_plan,
+                            ignored_modules=list(self.config.distributed.fsdp_plan.ignored_modules),
+                            ignored_params=sorted(parameter_names))))
         if hasattr(model.config, 'use_cache'):
             model.config.use_cache = False
         if self.args.router_aux_loss_coef:
@@ -266,8 +290,39 @@ class FSDPTurboTrainer(BaseTrainer):
         for module in model.model.modules():
             for name, buffer in module.named_buffers(recurse=False):
                 setattr(module, name, buffer.to(self.train_args.device))
+        self._replicated_parameters = [
+            parameter for name, parameter in model.model.named_parameters() if name in parameter_names
+        ]
+        for parameter in self._replicated_parameters:
+            parameter.data = parameter.data.to(self.train_args.device)
         self.template.model = model.model
         return model
+
+    def _sync_replicated_gradients(self):
+        if not self._replicated_parameters or not dist.is_initialized() or dist.get_world_size() == 1:
+            return
+        parameters = [parameter for parameter in self._replicated_parameters if parameter.requires_grad]
+        if not parameters:
+            return
+        # All ranks participate even when a local branch was unused. Globally
+        # unused replicas retain grad=None, so AdamW cannot decay them.
+        present = torch.tensor([parameter.grad is not None for parameter in parameters],
+                               device=parameters[0].device,
+                               dtype=torch.int32)
+        gradients = torch.cat([
+            (parameter.grad.detach() if parameter.grad is not None else torch.zeros_like(parameter)).reshape(-1)
+            for parameter in parameters
+        ])
+        dist.all_reduce(gradients, op=dist.ReduceOp.SUM)
+        dist.all_reduce(present, op=dist.ReduceOp.SUM)
+        gradients.div_(dist.get_world_size())
+        for parameter, gradient, active in zip(parameters, gradients.split([p.numel() for p in parameters]),
+                                               present.tolist()):
+            parameter.grad = gradient.view_as(parameter) if active else None
+
+    def _on_optimizer_step(self):
+        self._sync_replicated_gradients()
+        return super()._on_optimizer_step()
 
     def build_dataloader(self):
         if self.train_dataset is None:
@@ -284,9 +339,14 @@ class FSDPTurboTrainer(BaseTrainer):
         workers = self.train_args.dataloader_num_workers
         collator = partial(self.template.data_collator, padding_to=None)
         if self.spec.model_type == 'deepseek_v41':
-            from .data import _native_text_collator
+            from .data import _native_cp_alignment, _native_text_collator
 
-            collator = partial(_native_text_collator, self.template.data_collator)
+            collator = partial(
+                _native_text_collator,
+                self.template.data_collator,
+                sequence_alignment=_native_cp_alignment(self.model.model.model_args,
+                                                        parallel_state.get_cp_group_size()),
+                pad_token_id=self.template.tokenizer.pad_token_id or 0)
         kwargs = {
             'dataset': self.train_dataset,
             'batch_size': self.train_args.per_device_train_batch_size,
@@ -305,6 +365,19 @@ class FSDPTurboTrainer(BaseTrainer):
             })
             kwargs = {key: value for key, value in kwargs.items() if value is not None}
         return DataLoader(**kwargs)
+
+    def _split_batch_for_context_parallel(self, batch):
+        if self.spec.native_model_factory and self.model.parallel_state.get_cp_group_size() > 1:
+            from fsdp_turbo.distributed.context_parallel.batch import split_sequence_batch
+
+            # HF config carries a vision tower even for a text-only batch.
+            # Split native text explicitly instead of taking BaseTrainer's VLM bypass.
+            return split_sequence_batch(
+                batch,
+                group=self.model.parallel_state.get_cp_group(),
+                sequence_keys=('input_ids', 'attention_mask'),
+                build_position_ids=True)
+        return super()._split_batch_for_context_parallel(batch)
 
     def build_scheduler(self):
         if self.optimizer is None:

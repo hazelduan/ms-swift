@@ -96,11 +96,13 @@ def test_qwen_cp2_uses_backend_gdn_and_postfusion_interfaces():
     assert config.module_patches[0]['replacement'].endswith('qwen3_5_moe_model_forward')
 
 
-def test_unimplemented_deepseek_cp_is_not_silently_enabled():
+def test_native_cp_rejects_legacy_ulysses_selection():
     from swift.fsdpturbo.trainer import build_fsdpturbo_config
 
-    with pytest.raises(ValueError, match='CP is not implemented'):
-        build_fsdpturbo_config(make_args(2), get_model_spec('deepseek_v41'))
+    args = make_args(2)
+    args.cp_implementation = 'ulysses'
+    with pytest.raises(ValueError, match='supports kv_allgather CP'):
+        build_fsdpturbo_config(args, get_model_spec('deepseek_v41'))
 
 
 def test_native_v41_uses_intrinsic_reference_order_dispatcher():
@@ -113,7 +115,7 @@ def test_native_v41_uses_intrinsic_reference_order_dispatcher():
     assert spec.native_model_factory.endswith('adapter.build_deepseek_v41_model')
     assert config.distributed.ep_plan.dispatcher == 'custom_native_eager_forward'
     assert not config.memory.recompute
-    assert not spec.tp_colwise_modules and not spec.cp_function_patches
+    assert spec.tp_colwise_modules and not spec.cp_function_patches
 
 
 @pytest.mark.parametrize('mode,fused', [('eager', False), ('fused', True)])

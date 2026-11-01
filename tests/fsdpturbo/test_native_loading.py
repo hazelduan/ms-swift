@@ -124,6 +124,18 @@ def test_native_fp16_is_rejected_without_reading_weights(native_source):
         _native_factory(args)
 
 
+@pytest.mark.parametrize('length,ratio,expected', [(7, 0, 8), (9, 4, 16)])
+def test_native_cp_cache_covers_compression_aligned_padding(native_source, length, ratio, expected):
+    args, _, config = native_source
+    config['compress_ratios'] = [ratio]
+    (Path(args.model) / 'config.json').write_text(json.dumps(config))
+    args.cp_size = 2
+    args.max_length = length
+
+    assert _native_factory(args).keywords['model_args'].max_seq_len == expected
+    assert args.max_length == length
+
+
 def test_upstream_uniform_bf16_preparation_preserves_buffer_dtypes_and_deferred_tables(native_source):
     from fsdp_turbo.models.deepseek.deepseek_v41.adapter import prepare_deepseek_v41_model_for_fsdp
     from fsdp_turbo.models.deepseek.deepseek_v41.engram.host_offload_engram import host_engram_tables
@@ -213,7 +225,7 @@ def test_native_trainer_loads_after_wrapping_without_rank0_source(offload, devic
         offload_params=offload,
         resume_from_checkpoint=None,
         router_aux_loss_coef=0)
-    trainer.train_args = SimpleNamespace(device=torch.device(device))
+    trainer.train_args = SimpleNamespace(device=torch.device('cuda:0'))
     trainer.template = SimpleNamespace(model=None)
     trainer.train_dataset = None
     trainer.spec = SimpleNamespace(

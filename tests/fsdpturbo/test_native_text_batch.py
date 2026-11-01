@@ -137,7 +137,7 @@ def test_dataloader_selects_normalization_only_for_native_models(model_type):
     trainer.spec = get_model_spec(model_type)
     trainer.args = SimpleNamespace(data_seed=42)
     trainer.train_dataset = ['first', 'second']
-    trainer.template = SimpleNamespace(data_collator=collate)
+    trainer.template = SimpleNamespace(data_collator=collate, tokenizer=SimpleNamespace(pad_token_id=0))
     trainer.train_args = SimpleNamespace(
         train_dataloader_shuffle=False,
         dataloader_drop_last=False,
@@ -146,7 +146,9 @@ def test_dataloader_selects_normalization_only_for_native_models(model_type):
         dataloader_pin_memory=False,
     )
     trainer.model = SimpleNamespace(
-        parallel_state=SimpleNamespace(get_data_group_size=lambda: 1, get_data_rank=lambda: 0))
+        model=SimpleNamespace(model_args=SimpleNamespace(compress_ratios=(0, ), n_layers=1)),
+        parallel_state=SimpleNamespace(
+            get_data_group_size=lambda: 1, get_data_rank=lambda: 0, get_cp_group_size=lambda: 1))
 
     result = next(iter(trainer.build_dataloader()))
 

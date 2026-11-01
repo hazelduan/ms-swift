@@ -13,6 +13,7 @@ class FSDPTurboArguments:
     fsdp_size: int = 1
     tp_size: int = 1
     cp_size: int = 1
+    cp_implementation: Literal['auto', 'ulysses', 'kv_allgather', 'kcp'] = 'auto'
     ep_size: int = 1
     efsdp_size: int = 1
     pp_size: int = 1
@@ -35,6 +36,8 @@ class FSDPTurboArguments:
         for name, size in sizes.items():
             if size < 1:
                 raise ValueError(f'{name} must be positive, got {size}.')
+        if self.cp_implementation not in ('auto', 'ulysses', 'kv_allgather', 'kcp'):
+            raise ValueError(f'Unknown FSDPTurbo context-parallel implementation: {self.cp_implementation!r}.')
         if self.pp_size != 1:
             raise ValueError('FSDPTurbo main does not implement pipeline parallelism; pp_size must remain 1. '
                              'Adding PP outside the backend would build FSDP/EP meshes across pipeline stages.')

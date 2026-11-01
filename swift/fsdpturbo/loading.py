@@ -136,8 +136,12 @@ def _native_factory(args):
     model_kwargs = getattr(args, 'model_kwargs', None) or {}
     model_args = module.build_deepseek_v41_model_args(
         config_path=model_kwargs.get('config_path'), model_name_or_path=args.model)
+    from .data import _native_cp_alignment
+
+    alignment = _native_cp_alignment(model_args, getattr(args, 'cp_size', 1))
+    cache_length = (args.max_length + alignment - 1) // alignment * alignment
     model_args = replace(
-        model_args, max_seq_len=args.max_length, max_batch_size=args.training_args.per_device_train_batch_size)
+        model_args, max_seq_len=cache_length, max_batch_size=args.training_args.per_device_train_batch_size)
     return partial(factory, model_args=model_args, tokenizer=PreTrainedTokenizerFast.from_pretrained(Path(args.model)))
 
 
