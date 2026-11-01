@@ -2,7 +2,6 @@
 import math
 import torch
 import torch.distributed as dist
-from dataclasses import replace
 from fsdp_turbo.training.trainer import BaseTrainer
 from functools import partial
 from torch.utils.data import DataLoader, DistributedSampler
@@ -163,7 +162,6 @@ class FSDPTurboTrainer(BaseTrainer):
                                  'model-owned checkpoint state.')
         if args.tp_size > 1 and not (self.spec.tp_colwise_modules and self.spec.tp_rowwise_modules):
             raise ValueError(f'FSDPTurbo TP is not implemented for {args.model_type}. Use tp_size=1.')
-        self._replicated_parameters = []
         super().__init__(config=build_fsdpturbo_config(args, self.spec))
         self.processor = processor
 
@@ -205,9 +203,14 @@ class FSDPTurboTrainer(BaseTrainer):
         native = self.spec.native_model_factory is not None
         if not native:
             source_model, dtypes = load_rank0_model(self.args)
-        from accelerate import init_empty_weights
-        with init_empty_weights(include_buffers=False):
+        if native:
+            # Follow the upstream native lifecycle: build, normalize dtype and
+            # place modules, wrap parallelism, then stream pretrained shards.
             model = create_meta_model(self.args)
+        else:
+            from accelerate import init_empty_weights
+            with init_empty_weights(include_buffers=False):
+                model = create_meta_model(self.args)
         if not native:
             for name, param in model.named_parameters():
                 param.data = param.data.to(dtypes[name])
@@ -221,16 +224,22 @@ class FSDPTurboTrainer(BaseTrainer):
             require_ep=self.args.ep_size > 1,
             require_recompute=self.args.gradient_checkpointing,
         )
-        parameter_names = {
-            name
-            for name, param in model.named_parameters()
-            if param.dtype == torch.float32 and self.args.torch_dtype != torch.float32
-        }
-        self.config = replace(
-            self.config,
-            distributed=replace(
-                self.config.distributed,
-                fsdp_plan=replace(self.config.distributed.fsdp_plan, ignored_params=sorted(parameter_names))))
+        if native:
+            from fsdp_turbo.models.deepseek.deepseek_v41.adapter import prepare_deepseek_v41_model_for_fsdp
+
+            model = prepare_deepseek_v41_model_for_fsdp(
+                model, device=self.train_args.device, parameter_dtype=torch.bfloat16)
+        else:
+            # The minimal backend follows the upstream uniform-parameter dtype
+            # contract. Models requiring replicated mixed-dtype parameters need
+            # a separately validated backend capability.
+            mixed = [
+                name for name, parameter in model.named_parameters()
+                if parameter.is_floating_point() and parameter.dtype != self.args.torch_dtype
+            ]
+            if mixed:
+                raise ValueError('Minimal FSDPTurbo requires a uniform parameter dtype; '
+                                 f'mixed-dtype parameters: {mixed[:10]}')
         if hasattr(model.config, 'use_cache'):
             model.config.use_cache = False
         if self.args.router_aux_loss_coef:
@@ -246,10 +255,7 @@ class FSDPTurboTrainer(BaseTrainer):
         logger.info('Applying the independent FSDPTurbo parallel backend.')
         model = FSDPTurbo(self.config, model)
         if native:
-            model.model.from_pretrained(
-                self.args.model,
-                load_device=torch.device('cpu') if self.args.offload_params else self.train_args.device,
-                engram_rows_per_chunk=4096)
+            model.model.from_pretrained(self.args.model, strict=True, engram_rows_per_chunk=4096)
         elif self.args.resume_from_checkpoint:
             device = 'cpu' if self.args.offload_params else self.train_args.device
             materialize_resume_model(model.model, device=device)
@@ -260,39 +266,8 @@ class FSDPTurboTrainer(BaseTrainer):
         for module in model.model.modules():
             for name, buffer in module.named_buffers(recurse=False):
                 setattr(module, name, buffer.to(self.train_args.device))
-        self._replicated_parameters = [
-            param for name, param in model.model.named_parameters() if name in parameter_names
-        ]
-        for param in self._replicated_parameters:
-            param.data = param.data.to(self.train_args.device)
         self.template.model = model.model
         return model
-
-    def _sync_replicated_gradients(self):
-        if not self._replicated_parameters or not dist.is_initialized():
-            return
-        world_size = dist.get_world_size()
-        if world_size == 1:
-            return
-        params = [param for param in self._replicated_parameters if param.requires_grad]
-        if not params:
-            return
-        # Every rank issues the same collectives even when a compressed branch
-        # is unused for its local sequence. Globally unused parameters keep
-        # grad=None so AdamW does not decay them or create optimizer state.
-        present = torch.tensor([param.grad is not None for param in params], device=params[0].device, dtype=torch.int32)
-        gradients = torch.cat([(param.grad.detach() if param.grad is not None else torch.zeros_like(param)).reshape(-1)
-                               for param in params])
-        dist.all_reduce(gradients, op=dist.ReduceOp.SUM)
-        dist.all_reduce(present, op=dist.ReduceOp.SUM)
-        gradients.div_(world_size)
-        for param, gradient, active in zip(params, gradients.split([param.numel() for param in params]),
-                                           present.tolist()):
-            param.grad = gradient.view_as(param) if active else None
-
-    def _on_optimizer_step(self):
-        self._sync_replicated_gradients()
-        return super()._on_optimizer_step()
 
     def build_dataloader(self):
         if self.train_dataset is None:
@@ -345,8 +320,12 @@ class FSDPTurboTrainer(BaseTrainer):
             num_training_steps=num_training_steps,
             scheduler_specific_kwargs=self.train_args.lr_scheduler_kwargs or {},
         )
-        builder = getattr(self.optimizer, 'build_scheduler', None)
-        return builder(factory) if callable(builder) else factory(optimizer=self.optimizer)
+        optimizers = getattr(self.optimizer, 'checkpoint_optimizers', None)
+        if optimizers is not None:
+            from fsdp_turbo.models.deepseek.deepseek_v41.engram.engram_optimizer import EngramSchedulerContainer
+
+            return EngramSchedulerContainer([factory(optimizer=optimizer) for optimizer in optimizers])
+        return factory(optimizer=self.optimizer)
 
     def build_optimizer(self):
         from fsdp_turbo.quantization.cache import hook_optimizer_step

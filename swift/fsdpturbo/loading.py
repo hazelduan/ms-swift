@@ -133,7 +133,9 @@ def _native_factory(args):
     factory = getattr(module, name)
     from transformers import PreTrainedTokenizerFast
 
-    model_args = module.build_deepseek_v41_model_args(model_name_or_path=args.model)
+    model_kwargs = getattr(args, 'model_kwargs', None) or {}
+    model_args = module.build_deepseek_v41_model_args(
+        config_path=model_kwargs.get('config_path'), model_name_or_path=args.model)
     model_args = replace(
         model_args, max_seq_len=args.max_length, max_batch_size=args.training_args.per_device_train_batch_size)
     return partial(factory, model_args=model_args, tokenizer=PreTrainedTokenizerFast.from_pretrained(Path(args.model)))

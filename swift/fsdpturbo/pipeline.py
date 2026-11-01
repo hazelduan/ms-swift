@@ -44,12 +44,8 @@ class FSDPTurboSft(SwiftSft):
                 append_to_jsonl(f'{self.args.output_dir}/logging.jsonl', self.train_msg, strict=False)
             return self.train_msg
         finally:
-            try:
-                if dist.is_initialized():
-                    dist.destroy_process_group()
-            finally:
-                from fsdp_turbo.distributed.parallel_state import reset_parallel_state
-                reset_parallel_state()
+            if dist.is_initialized():
+                dist.destroy_process_group()
 
 
 def fsdpturbo_sft_main(args: Optional[Union[List[str], FSDPTurboSftArguments]] = None):

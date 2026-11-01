@@ -124,6 +124,37 @@ def test_native_fp16_is_rejected_without_reading_weights(native_source):
         _native_factory(args)
 
 
+def test_upstream_uniform_bf16_preparation_preserves_buffer_dtypes_and_deferred_tables(native_source):
+    from fsdp_turbo.models.deepseek.deepseek_v41.adapter import prepare_deepseek_v41_model_for_fsdp
+    from fsdp_turbo.models.deepseek.deepseek_v41.engram.host_offload_engram import host_engram_tables
+
+    args, _, _ = native_source
+    model = _native_factory(args)()
+    buffer_dtypes = {name: value.dtype for name, value in model.named_buffers()}
+
+    assert prepare_deepseek_v41_model_for_fsdp(model, device='cpu', parameter_dtype=torch.bfloat16) is model
+    assert all(parameter.dtype == torch.bfloat16 for parameter in model.parameters())
+    assert {name: value.dtype for name, value in model.named_buffers()} == buffer_dtypes
+    assert host_engram_tables(model)
+    assert all(table.weight.is_meta for table in host_engram_tables(model))
+
+
+def test_native_architecture_config_can_be_separate_from_hf_metadata(native_source):
+    args, _, config = native_source
+    native_config = Path(args.model) / 'native_model_args.json'
+    native_config.write_text(json.dumps(config))
+    metadata = {'model_type': 'deepseek_v41', 'text_config': {'hidden_size': config['dim']}}
+    (Path(args.model) / 'config.json').write_text(json.dumps(metadata))
+    args.model_kwargs = {'config_path': str(native_config)}
+
+    factory = _native_factory(args)
+
+    assert factory.keywords['model_args'].dim == config['dim']
+    assert factory.keywords['model_args'].max_seq_len == args.max_length
+    assert json.loads(native_config.read_text()) == config
+    assert json.loads((Path(args.model) / 'config.json').read_text()) == metadata
+
+
 def test_native_metadata_namespace_is_owned_by_swift(native_source):
     from torch import nn
 
@@ -168,8 +199,8 @@ def test_native_trainer_loads_after_wrapping_without_rank0_source(offload, devic
             self.weight = nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
             self.config = SimpleNamespace(use_cache=True)
 
-        def from_pretrained(self, path, *, load_device, engram_rows_per_chunk):
-            events.append(('load', path, load_device, engram_rows_per_chunk))
+        def from_pretrained(self, path, *, strict, engram_rows_per_chunk):
+            events.append(('load', path, strict, engram_rows_per_chunk))
 
     model = Model()
     trainer = object.__new__(FSDPTurboTrainer)
@@ -196,7 +227,14 @@ def test_native_trainer_loads_after_wrapping_without_rank0_source(offload, devic
         events.append(('wrap', ))
         return SimpleNamespace(model=candidate)
 
+    def prepare(candidate, *, device, parameter_dtype):
+        assert parameter_dtype == torch.bfloat16
+        events.append(('prepare', device))
+        return candidate
+
     with mock.patch.object(TunerMixin, 'prepare_model', return_value=model), \
+            mock.patch('fsdp_turbo.models.deepseek.deepseek_v41.adapter.prepare_deepseek_v41_model_for_fsdp',
+                       side_effect=prepare), \
             mock.patch('swift.fsdpturbo.loading.create_meta_model', return_value=model), \
             mock.patch('swift.fsdpturbo.loading.load_rank0_model', side_effect=AssertionError('native rank0 load')), \
             mock.patch('swift.fsdpturbo.loading.materialize_sharded_model',
@@ -204,5 +242,5 @@ def test_native_trainer_loads_after_wrapping_without_rank0_source(offload, devic
             mock.patch('fsdp_turbo.fsdp_turbo.FSDPTurbo', side_effect=wrap):
         assert trainer.build_model().model is model
 
-    assert events == [('wrap', ), ('load', '/source/native', torch.device('cpu' if offload else device), 4096)]
+    assert events == [('prepare', torch.device(device)), ('wrap', ), ('load', '/source/native', True, 4096)]
     assert not model.config.use_cache
