@@ -49,6 +49,8 @@ def build_fsdpturbo_config(args, spec: FSDPTurboModelSpec):
     cp_size = args.cp_size
     cp_implementation = _cp_implementation(args, spec)
     native_cp = spec.native_model_factory and cp_implementation == 'kv_allgather'
+    if native_cp and cp_size > 1 and args.tp_size > 1:
+        raise ValueError('Native V4.1 KV-AllGather requires Ulysses=KCP=TP=1.')
     if cp_size > 1 and not (native_cp or spec.cp_function_patches):
         raise ValueError(f'FSDPTurbo CP is not implemented for {spec.model_type}. Use cp_size=1.')
     module_patches = spec.module_patches + (spec.cp_module_patches if cp_size > 1 else ())

@@ -90,7 +90,7 @@ def test_native_text_is_sharded_even_with_hf_vision_metadata(rank):
     assert local['labels'] is labels
 
 
-def test_native_tp_and_kv_cp_preserve_upstream_combination_constraint():
+def test_native_tp_and_kv_cp_preserve_combination_constraint():
     from swift.fsdpturbo.trainer import build_fsdpturbo_config
 
     args = make_args(2)
