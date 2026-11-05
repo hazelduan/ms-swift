@@ -6,6 +6,7 @@ from dataclasses import replace
 from fsdp_turbo.training.trainer import BaseTrainer
 from functools import partial
 from torch.utils.data import DataLoader, DistributedSampler
+from types import SimpleNamespace
 
 from swift.pipelines.train.tuner import TunerMixin
 from swift.utils import get_logger, seed_worker
@@ -427,12 +428,16 @@ class FSDPTurboTrainer(BaseTrainer):
         } for decay in (True, False)]
         kwargs = dict(lr=config.lr, betas=(config.adam_beta1, config.adam_beta2), eps=config.adam_epsilon)
         if tables:
+
+            def create_optimizer(name, params, **options):
+                return OptimizerFactory.create(name, groups if name == config.optimizer_type else params, **options)
+
             optimizer = OptimizerFactory.create(
                 'EngramOptimizer',
                 self.model,
                 tables,
                 dense_optimizer_type=config.optimizer_type,
-                dense_param_groups=groups,
+                optimizer_factory=SimpleNamespace(create=create_optimizer),
                 **kwargs)
         else:
             optimizer = OptimizerFactory.create(config.optimizer_type, groups, **kwargs)

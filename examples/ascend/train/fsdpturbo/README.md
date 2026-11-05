@@ -4,7 +4,7 @@
 
 ## Source pair
 
-Install this Swift checkout and pin FSDPTurbo to [`7399bdf3cbaf09560141e11572f41f10832222e6`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/7399bdf3cbaf09560141e11572f41f10832222e6), based on upstream `6d69def`. The compatibility changes contain model/optional-dependency import fixes, native FSDP import isolation, eager MoE inverse-map and CUDA grouped-matmul fixes, parameter exclusions, Engram dense parameter groups, and owner-local HF initial loading into EFSDP intermediate shards, Triton device-property queries, and TP-local Ulysses GQA heads. Native V4.1 uses the upstream BF16 builder and sharded loader; it does not require a fork-specific checkpoint decoder or `load_device` argument. Transformers 5.16 or newer is required by the paired backend.
+Install this Swift checkout and pin FSDPTurbo to [`932c72f5fe391f0d5b01c888ff92179c478372ba`](https://gitcode.com/hazeldxq/FSDPTurbo/commit/932c72f5fe391f0d5b01c888ff92179c478372ba), based on upstream `43feabd`. The compatibility changes contain optional-dependency import fixes, native FSDP import isolation, CUDA grouped-matmul fixes, parameter exclusions, and owner-local HF initial loading into EFSDP intermediate shards, Triton device-property queries, and TP-local Ulysses GQA heads. Native V4.1 uses the upstream BF16 builder and sharded loader; it does not require a fork-specific checkpoint decoder or `load_device` argument. Transformers 5.16 or newer is required by the paired backend.
 
 ## Native DeepSeek V4.1
 
@@ -31,7 +31,7 @@ NPROC_PER_NODE=4 MASTER_PORT=29501 swift fsdpturbo sft \
 
 The CLI starts one torchrun launcher. Set device visibility in the caller's CUDA or CANN environment. `enable_npu_model_patch=false` must take effect before Swift model imports because this backend owns parallel wrapping.
 
-Swift calls the native builder, normalizes parameters to BF16 through `prepare_deepseek_v41_model_for_fsdp`, applies FSDPTurbo, then calls `model.from_pretrained(strict=True, engram_rows_per_chunk=4096)`. Parameter preparation uses CPU when CPU offload is enabled. Buffers retain their native dtypes; the head retains FP32 computation. Host Engram weights and active-row FP32 moments use the model's existing optimizer, while the dense optimizer accepts Swift's decay/no-decay groups.
+Swift calls the native builder, normalizes parameters to BF16 through `prepare_deepseek_v41_model_for_fsdp`, applies FSDPTurbo, then calls `model.from_pretrained(strict=True, engram_rows_per_chunk=4096)`. Parameter preparation uses CPU when CPU offload is enabled. Buffers retain their native dtypes; the head retains FP32 computation. Host Engram weights and active-row FP32 moments use the model's existing optimizer, while Swift supplies its decay/no-decay groups through the existing optimizer factory. This preserves zero and nonzero weight decay without adding an Engram optimizer argument.
 
 ## Parallel interfaces
 
